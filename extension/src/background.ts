@@ -4,8 +4,10 @@ import {
   findRef,
   focusRef,
   locateRef,
+  mainScroller,
   pageRoots,
   readValue,
+  scrollKey,
   selectOption,
   setValue,
   shotArea,
@@ -327,6 +329,7 @@ async function evaluate<T>(tabId: number, fn: (...args: never[]) => unknown, arg
   const expression = `(() => {
     const pageRoots = ${pageRoots.toString()};
     const findRef = ${findRef.toString()};
+    const mainScroller = ${mainScroller.toString()};
     return (${fn.toString()})(${arg === undefined ? "" : JSON.stringify(arg)});
   })()`;
   return (await evaluateExpression(tabId, expression)) as T;
@@ -419,8 +422,11 @@ async function startAction(tabId: number, refs: string[]): Promise<ActionStart> 
   return { before, targets, url: tab.url ?? "", front: front?.id };
 }
 
-/** Keeps tabs an action opened in the background, in the agent's group, and says what they hold. */
+/** Keeps tabs an action opened in the background, in the acting tab's group (else the agent's), and says what they hold. */
 async function placeOpenedTabs(tabId: number, opened: number[], start: ActionStart, agent: string): Promise<TabInfo[]> {
+  const source = await chrome.tabs.get(tabId).catch(() => null);
+  const sourceGroup = source !== null && source.groupId !== -1 ? await chrome.tabGroups.get(source.groupId).catch(() => null) : null;
+  const group = sourceGroup?.title || agent;
   const tabs: TabInfo[] = [];
   for (const id of opened) {
     await waitForLoad(id, 5_000);
@@ -429,8 +435,8 @@ async function placeOpenedTabs(tabId: number, opened: number[], start: ActionSta
     if (tab.active && start.front !== undefined && start.front !== id && start.front !== tabId) {
       await chrome.tabs.update(start.front, { active: true }).catch(() => undefined);
     }
-    await groupTab(id, agent).catch(() => undefined);
-    tabs.push({ tab_id: id, title: tab.title ?? "", url: tab.url || tab.pendingUrl || "", group: agent });
+    await groupTab(id, group).catch(() => undefined);
+    tabs.push({ tab_id: id, title: tab.title ?? "", url: tab.url || tab.pendingUrl || "", group });
   }
   return tabs;
 }
@@ -541,6 +547,7 @@ async function pressKey(tabId: number, combo: string): Promise<void> {
   } else {
     throw new Error(`Unknown key ${keyName}. Use a single character or one of ${Object.keys(KEYS).join(", ")}.`);
   }
+  if (modifiers === 0 && (await evaluate<boolean>(tabId, scrollKey, event.key))) return;
   await cdp(tabId, "Input.dispatchKeyEvent", { type: event.text ? "keyDown" : "rawKeyDown", modifiers, ...event }, INPUT_TIMEOUT_MS);
   await cdp(tabId, "Input.dispatchKeyEvent", { type: "keyUp", modifiers, ...event }, INPUT_TIMEOUT_MS);
 }
@@ -664,7 +671,7 @@ async function dispatch(request: BridgeRequest): Promise<unknown> {
       const history = target === "back" || target === "forward" || target === "reload";
       if (params.tab_id === undefined) {
         if (history) throw new Error(`${target} needs a tab_id.`);
-        const tabId = await openTab(target, agent);
+        const tabId = await openTab(target, params.group?.trim() || agent);
         await waitForLoad(tabId);
         const waitFor = waitForParam(params);
         const waited = waitFor !== null ? await waitForText(tabId, waitFor) : undefined;

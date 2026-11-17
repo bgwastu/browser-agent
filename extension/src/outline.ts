@@ -28,8 +28,9 @@ export function diffOutline(before: string[] | null, after: string[], navigated:
       left.set(line, count - 1);
     }
   }
-  // Another page, or a view that replaced most of this one: its outline says more than the lists.
-  if (added.length > 0 && (navigated || added.length + removed.length > CHANGE_LINES) && added.length * 2 > after.length) return outline();
+  // Another page (an in-app navigation keeps the header and menus, so it does not have to look new),
+  // or a view that replaced most of this one: its outline says more than the lists.
+  if (added.length > 0 && (navigated || (added.length + removed.length > CHANGE_LINES && added.length * 2 > after.length))) return outline();
   const truncated = added.length > CHANGE_LINES || removed.length > CHANGE_LINES;
   return { added: added.slice(0, CHANGE_LINES), removed: removed.slice(0, CHANGE_LINES), ...(truncated ? { truncated: true } : {}) };
 }

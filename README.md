@@ -7,7 +7,7 @@ agent ──MCP (HTTP)──▶ browser-agent server ◀──WebSocket── Ch
 ```
 
 - The extension connects **out** to the server, so the server can run anywhere: your laptop, a VPS, or a PaaS.
-- Every agent gets its **own tab group**, titled with the agent's name. Tabs it opens, or that its clicks open, land in that group.
+- Agents keep their tabs in **tab groups named for their task**: `browser_navigate` takes a `group` name for a new tab, and tabs a page opens join its group.
 - Agents read pages as a compact outline with `[eN]` refs. After every action they get a diff of what changed.
 - One browser at a time. If a second extension connects, it replaces the first.
 
@@ -20,7 +20,7 @@ Forked from [qwadrox/bb-plugin-desktop-browser-agent](https://github.com/qwadrox
 | Tool | What it does |
 | --- | --- |
 | `browser_tabs` | List the open tabs with ids, titles, URLs and groups |
-| `browser_navigate` | Open a URL. With no `tab_id` it opens a new tab in the agent's group. Also takes `back`, `forward` and `reload` |
+| `browser_navigate` | Open a URL. With no `tab_id` it opens a new tab in the tab group named by `group`. Also takes `back`, `forward` and `reload` |
 | `browser_read` | Read the page as an outline with refs; `query` and `scope` narrow it |
 | `browser_click` | Click a ref with a trusted mouse event |
 | `browser_fill` | Fill text fields, selects and checkboxes in one call |
@@ -47,7 +47,7 @@ SECRET=$(openssl rand -hex 16) PORT=3000 bun start
 
 Endpoints:
 
-- `POST /mcp/<SECRET>?agent=<name>`: stateless Streamable HTTP MCP. You can send the agent name as an `X-Agent-Id` header instead. The default name is `Agent`.
+- `POST /mcp/<SECRET>?agent=<name>`: stateless Streamable HTTP MCP. `agent` (or an `X-Agent-Id` header) is optional: it's the group name when the agent doesn't pass `group`. The default is `Agent`.
 - `GET /ext/<SECRET>`: the extension's WebSocket.
 - `GET /healthz`: `{"ok":true,"browser":{…} | null}`.
 
@@ -92,7 +92,7 @@ Any MCP client that speaks Streamable HTTP:
 }
 ```
 
-Give each agent its own `agent=` name and it gets its own tab group. Agents can still see and use every tab.
+Agents name their own groups per task. `agent=` only sets the fallback name. Agents can still see and use every tab.
 
 ## Develop
 

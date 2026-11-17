@@ -5,7 +5,8 @@
 export interface BridgeParams {
   tabs: {};
   /** Without tab_id, opens a new background tab in the agent's group. url may also be back, forward or reload with a tab_id. */
-  navigate: { tab_id?: number; url: string; wait_for?: string };
+  /** `group` titles the tab group a new tab goes into; it defaults to the agent's name. */
+  navigate: { tab_id?: number; url: string; group?: string; wait_for?: string };
   /** `scope` is "main", "dialog" or a ref; `wait_for` waits up to 10 s for text to appear first. */
   read: { tab_id: number; query?: string; offset?: number; max_chars?: number; scope?: string; wait_for?: string };
   click: { tab_id: number; ref: string; wait_for?: string };

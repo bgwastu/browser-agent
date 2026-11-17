@@ -27,17 +27,24 @@ export const BROWSER_TOOLS: readonly BrowserTool[] = [
   {
     name: "browser_tabs",
     method: "tabs",
-    description: "List the open tabs of the user's browser with tab ids, titles, URLs and tab groups. Each agent's tabs are in a group titled with its name.",
+    description: "List the open tabs of the user's browser with tab ids, titles, URLs and tab groups. Agents keep their tabs in tab groups named for their task.",
     shape: shape("tabs", {}),
   },
   {
     name: "browser_navigate",
     method: "navigate",
     description:
-      "Without tab_id: open a URL in a new background tab, in this agent's tab group, and return its tab_id. With tab_id: load a URL in that tab, or pass back, forward or reload.",
+      "Without tab_id: open a URL in a new background tab, in the tab group named by `group`, and return its tab_id. With tab_id: load a URL in that tab, or pass back, forward or reload. Tabs a page opens (such as target=_blank links) join the same group.",
     shape: shape("navigate", {
       tab_id: tabId.optional(),
       url: z.string().min(1).describe("A URL, or back, forward or reload (with tab_id)"),
+      group: z
+        .string()
+        .trim()
+        .min(1)
+        .max(40)
+        .optional()
+        .describe("For a new tab: a short name for your task, such as \"Flight search\", used as the tab group's title. Pass the same name to keep related tabs together. Defaults to the agent's name."),
       wait_for: waitFor,
     }),
   },

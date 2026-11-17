@@ -69,6 +69,49 @@ export interface SnapshotResult {
  * that are gone or hidden are dropped. So an old ref never names a different
  * element: it names the same one, or none.
  */
+/**
+ * What scrolls the page: the document, or, on apps that keep the window still and
+ * scroll a panel instead (LinkedIn, Gmail, many dashboards), the biggest visible panel that scrolls.
+ */
+export function mainScroller(): Element {
+  const root = document.scrollingElement ?? document.documentElement;
+  if (root.scrollHeight - root.clientHeight > 1) return root;
+  let best: Element = root;
+  let bestArea = 0;
+  for (const element of Array.from(document.querySelectorAll("*"))) {
+    if (element.scrollHeight - element.clientHeight <= 50) continue;
+    if (!/(auto|scroll|overlay)/.test(getComputedStyle(element).overflowY)) continue;
+    const box = element.getBoundingClientRect();
+    const area = Math.max(0, Math.min(box.right, innerWidth) - Math.max(box.left, 0)) * Math.max(0, Math.min(box.bottom, innerHeight) - Math.max(box.top, 0));
+    if (area > bestArea) {
+      best = element;
+      bestArea = area;
+    }
+  }
+  return best;
+}
+
+/**
+ * A scroll key when nothing editable has focus, on a page whose window does not scroll: keys go to
+ * the focused element, so the browser would scroll nothing. Scrolls the main panel; false when the
+ * browser's own handling is right.
+ */
+export function scrollKey(key: string): boolean {
+  const active = document.activeElement;
+  if (active !== null && active !== document.body && active !== document.documentElement) {
+    if ((active as HTMLElement).isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) return false;
+  }
+  const scroller = mainScroller();
+  if (scroller === (document.scrollingElement ?? document.documentElement)) return false;
+  const page = scroller.clientHeight * 0.85;
+  const deltas: Record<string, number> = { PageDown: page, PageUp: -page, ArrowDown: 40, ArrowUp: -40, " ": page };
+  if (key === "End") scroller.scrollTop = scroller.scrollHeight;
+  else if (key === "Home") scroller.scrollTop = 0;
+  else if (deltas[key] !== undefined) scroller.scrollTop += deltas[key];
+  else return false;
+  return true;
+}
+
 export function snapshotPage(options: SnapshotOptions): SnapshotResult {
   const ATTRIBUTE = "data-agent-ref";
   const WAS = "data-agent-was";
@@ -339,7 +382,12 @@ export function snapshotPage(options: SnapshotOptions): SnapshotResult {
   const header = [
     `Title: ${document.title}`,
     `URL: ${location.href}`,
-    `Scroll: ${Math.round(scrollY)} of ${Math.max(0, document.documentElement.scrollHeight - innerHeight)} px`,
+    (() => {
+      const scroller = mainScroller();
+      const inner = scroller !== (document.scrollingElement ?? document.documentElement);
+      const where = inner ? ` (in the page's scrolling panel; PageDown/End scroll it)` : "";
+      return `Scroll: ${Math.round(scroller.scrollTop)} of ${Math.max(0, scroller.scrollHeight - scroller.clientHeight)} px${where}`;
+    })(),
     "",
   ];
   const query = options.query?.trim().toLowerCase() ?? null;

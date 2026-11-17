@@ -27,6 +27,11 @@ const FORM = `<!doctype html><title>Form</title>
 <p id="out"></p>
 <a href="/second">Next page</a>
 <div style="height:3000px"></div>`;
+const PANEL = `<!doctype html><title>Panel</title>
+<style>html, body { margin: 0; height: 100%; overflow: hidden } main { height: 100vh; overflow-y: auto }</style>
+<main id="workspace"><h1>Inbox</h1>
+<button onclick="history.pushState({}, '', '/panel/settings'); document.querySelector('h1').textContent = 'Settings'; document.getElementById('body').innerHTML = '<p>Notifications</p><p>Privacy</p><p>Theme</p>'">Settings</button>
+<div id="body"><p>Message 1</p></div><div style="height:4000px"></div></main>`;
 const SECOND = `<!doctype html><title>Second</title><p>Second page</p>`;
 const FEATURES = `<!doctype html><title>Features</title>
 <script>window.appState = { user: "ada", items: 3 };</script>
@@ -97,7 +102,7 @@ describe.skipIf(!enabled)("browser-agent end to end", () => {
       hostname: "127.0.0.1",
       fetch(request) {
         const path = new URL(request.url).pathname;
-        const html = ({ "/second": SECOND, "/features": FEATURES } as Record<string, string>)[path] ?? FORM;
+        const html = ({ "/second": SECOND, "/features": FEATURES, "/panel": PANEL } as Record<string, string>)[path] ?? FORM;
         return new Response(html, { headers: { "content-type": "text/html" } });
       },
     });
@@ -190,6 +195,22 @@ describe.skipIf(!enabled)("browser-agent end to end", () => {
     } catch (error) {
       expect(String(error)).toContain("not drawing this tab");
     }
+  });
+
+  it("names the group after the task, and scrolls a page's inner panel", async () => {
+    const panel = tabIdIn(await call("browser_navigate", { url: `${base}/panel`, group: "Mail triage" }));
+    expect(await call("browser_tabs")).toContain(`tab ${panel}: Panel — ${base}/panel [group: Mail triage]`);
+    expect(await call("browser_read", { tab_id: panel })).toContain("Scroll: 0 of ");
+    await call("browser_key", { tab_id: panel, key: "End" });
+    expect(await call("browser_read", { tab_id: panel })).toMatch(/Scroll: [1-9]\d+ of \d+ px \(in the page's scrolling panel/);
+    await call("browser_key", { tab_id: panel, key: "Home" });
+    expect(await call("browser_read", { tab_id: panel })).toContain("Scroll: 0 of ");
+    // An in-app navigation keeps the header, but is still reported as a new page.
+    const page = await call("browser_read", { tab_id: panel });
+    const moved = await call("browser_click", { tab_id: panel, ref: refFor(page, /button "Settings"/) });
+    expect(moved).toContain("The page changed");
+    expect(moved).toContain("Privacy");
+    await call("browser_close", { tab_id: panel });
   });
 
   it("gives another agent its own group", async () => {
