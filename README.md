@@ -21,13 +21,17 @@ Forked from [qwadrox/bb-plugin-desktop-browser-agent](https://github.com/qwadrox
 | --- | --- |
 | `browser_tabs` | List the open tabs with ids, titles, URLs and groups |
 | `browser_navigate` | Open a URL. With no `tab_id` it opens a new tab in the tab group named by `group`. Also takes `back`, `forward` and `reload` |
-| `browser_read` | Read the page as an outline with refs; `query` and `scope` narrow it |
-| `browser_click` | Click a ref with a trusted mouse event |
+| `browser_read` | Read the page as an outline with refs; `interactive`, `query` and `scope` narrow it. Controls with no name get a hint (icon, test id) |
+| `browser_click` | Click a ref or an x/y point with trusted mouse input: right/middle button, double/triple click, modifiers, hover, and drag (including HTML drag and drop) |
+| `browser_upload` | Give files to a file input, or drop them on an element, from a path on the browser's computer, a URL, or base64 data |
+| `browser_logs` | Console messages, page errors and network requests, recorded from the first call on a tab; `request_id` gives a request's headers and bodies |
 | `browser_fill` | Fill text fields, selects and checkboxes in one call |
 | `browser_key` | Press a key or a combo (`Enter`, `Control+A`, …) |
 | `browser_eval` | Run an async JS function body, in an isolated world (default) or the page's `main` world; returns its JSON value |
 | `browser_screenshot` | Take a JPEG of the tab or of one ref |
 | `browser_close` | Close a tab |
+
+If the page re-rendered an element, so its ref is gone, actions use the one element with the same role and name and say so.
 
 Actions take an optional `wait_for` text to wait for after the action. Dialogs (`alert`, `confirm`, `prompt`) are accepted automatically and reported in the result.
 

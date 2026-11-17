@@ -1,11 +1,13 @@
 import {
   domClick,
-  fieldKind,
   findRef,
+  fieldKind,
   focusRef,
   locateRef,
   mainScroller,
   pageRoots,
+  pointAt,
+  putFiles,
   readValue,
   scrollKey,
   selectOption,
@@ -20,7 +22,7 @@ import {
 } from "./page.js";
 import { diffOutline } from "./outline.js";
 import { SERVER_URL } from "./config.js";
-import { SERVER_URL_KEY, type ActionResult, type BridgeMessage, type BridgeRequest, type ConnectionStatus, type PageDialog, type TabInfo } from "./shared.js";
+import { SERVER_URL_KEY, type ActionResult, type BridgeMessage, type BridgeRequest, type ConnectionStatus, type PageDialog, type TabInfo, type UploadFile } from "./shared.js";
 
 const CDP_VERSION = "1.3";
 const CDP_TIMEOUT_MS = 10_000;
@@ -30,6 +32,9 @@ const SCREENSHOT_TIMEOUT_MS = 6_000;
 const LOAD_TIMEOUT_MS = 20_000;
 const WAIT_FOR_MS = 10_000;
 const IDLE_DETACH_MS = 60_000;
+/** A tab recording logs stays attached this long without use. */
+const RECORDING_DETACH_MS = 15 * 60_000;
+const LOG_LIMIT = 500;
 const PING_MS = 20_000;
 const RECONNECT_ALARM = "reconnect";
 
@@ -206,6 +211,116 @@ const worlds = new Map<number, World>();
 const dialogLog = new Map<number, PageDialog[]>();
 /** The next ref number per tab, so a new document in the tab does not hand out an earlier page's refs again. */
 const refCounters = new Map<number, number>();
+/** Per tab, each ref's last outline line without the ref, to find its element again after a re-render. */
+const refLines = new Map<number, Map<string, string>>();
+
+interface ConsoleEntry {
+  level: string;
+  text: string;
+  source?: string;
+}
+interface NetworkEntry {
+  id: string;
+  method: string;
+  url: string;
+  type: string;
+  status?: number;
+  mime?: string;
+  size?: number;
+  error?: string;
+  /** The request's headers and body, for request_id. */
+  headers?: Record<string, string>;
+  post?: string;
+  responseHeaders?: Record<string, string>;
+}
+/** Tabs recording logs (since the first browser_logs call), with what they recorded. */
+const consoleLog = new Map<number, ConsoleEntry[]>();
+const networkLog = new Map<number, Map<string, NetworkEntry>>();
+
+function capped<T>(list: T[], entry: T): void {
+  list.push(entry);
+  if (list.length > LOG_LIMIT) list.splice(0, list.length - LOG_LIMIT);
+}
+
+function remoteText(value: { value?: unknown; description?: string; type?: string; unserializableValue?: string }): string {
+  if (value.value !== undefined) return typeof value.value === "string" ? value.value : JSON.stringify(value.value);
+  return value.description ?? value.unserializableValue ?? value.type ?? "";
+}
+
+/** Records console and network events of tabs that are recording. */
+function recordEvent(tabId: number, method: string, params: Record<string, unknown>): void {
+  const logs = consoleLog.get(tabId);
+  const requests = networkLog.get(tabId);
+  if (logs === undefined || requests === undefined) return;
+  switch (method) {
+    case "Runtime.consoleAPICalled": {
+      const args = (params.args as Array<Parameters<typeof remoteText>[0]>) ?? [];
+      const frame = (params.stackTrace as { callFrames?: Array<{ url: string; lineNumber: number }> } | undefined)?.callFrames?.[0];
+      capped(logs, {
+        level: String(params.type ?? "log"),
+        text: args.map(remoteText).join(" ").slice(0, 4_000),
+        ...(frame?.url ? { source: `${frame.url}:${frame.lineNumber + 1}` } : {}),
+      });
+      break;
+    }
+    case "Runtime.exceptionThrown": {
+      const details = (params.exceptionDetails ?? {}) as { text?: string; exception?: { description?: string }; url?: string; lineNumber?: number };
+      capped(logs, {
+        level: "exception",
+        text: (details.exception?.description ?? details.text ?? "").slice(0, 4_000),
+        ...(details.url ? { source: `${details.url}:${(details.lineNumber ?? 0) + 1}` } : {}),
+      });
+      break;
+    }
+    case "Log.entryAdded": {
+      const entry = (params.entry ?? {}) as { level?: string; text?: string; url?: string; source?: string };
+      if (entry.source === "console-api") break;
+      capped(logs, { level: entry.level ?? "log", text: `${entry.text ?? ""}`.slice(0, 4_000), ...(entry.url ? { source: entry.url } : {}) });
+      break;
+    }
+    case "Network.requestWillBeSent": {
+      const request = (params.request ?? {}) as { method?: string; url?: string; headers?: Record<string, string>; postData?: string };
+      const id = String(params.requestId);
+      requests.set(id, {
+        id,
+        method: request.method ?? "GET",
+        url: request.url ?? "",
+        type: String(params.type ?? "Other"),
+        ...(request.headers ? { headers: request.headers } : {}),
+        ...(request.postData ? { post: request.postData.slice(0, 20_000) } : {}),
+      });
+      if (requests.size > LOG_LIMIT) requests.delete(requests.keys().next().value as string);
+      break;
+    }
+    case "Network.responseReceived": {
+      const entry = requests.get(String(params.requestId));
+      const response = (params.response ?? {}) as { status?: number; mimeType?: string; headers?: Record<string, string> };
+      if (entry !== undefined) {
+        entry.status = response.status;
+        entry.mime = response.mimeType;
+        if (response.headers) entry.responseHeaders = response.headers;
+      }
+      break;
+    }
+    case "Network.loadingFinished": {
+      const entry = requests.get(String(params.requestId));
+      if (entry !== undefined) entry.size = Number(params.encodedDataLength ?? 0);
+      break;
+    }
+    case "Network.loadingFailed": {
+      const entry = requests.get(String(params.requestId));
+      if (entry !== undefined) entry.error = String(params.errorText ?? "failed");
+      break;
+    }
+  }
+}
+
+/** Turns on the event domains that feed the logs. */
+async function startRecording(tabId: number): Promise<void> {
+  await cdp(tabId, "Runtime.enable").catch(() => undefined);
+  await cdp(tabId, "Log.enable").catch(() => undefined);
+  await cdp(tabId, "Network.enable", { maxPostDataSize: 20_000 }).catch(() => undefined);
+}
 
 function forget(tabId: number): void {
   attached.delete(tabId);
@@ -218,7 +333,15 @@ chrome.debugger.onDetach.addListener((source) => {
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const tabId = source.tabId;
-  if (tabId === undefined || method !== "Page.javascriptDialogOpening") return;
+  if (tabId === undefined) return;
+  if (method === "Input.dragIntercepted") {
+    dragWaiters.get(tabId)?.((params as { data?: unknown } | undefined)?.data ?? null);
+    return;
+  }
+  if (method !== "Page.javascriptDialogOpening") {
+    recordEvent(tabId, method, (params ?? {}) as Record<string, unknown>);
+    return;
+  }
   // Every dialog is accepted at once (a prompt with its default answer) and reported in the action's result.
   const event = (params ?? {}) as { type?: string; message?: string; defaultPrompt?: string };
   const log = dialogLog.get(tabId) ?? [];
@@ -230,7 +353,10 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   forget(tabId);
   refCounters.delete(tabId);
+  refLines.delete(tabId);
   dialogLog.delete(tabId);
+  consoleLog.delete(tabId);
+  networkLog.delete(tabId);
 });
 
 // A new document replaces the page's isolated world. A call that raced the load recovers in run().
@@ -242,7 +368,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 setInterval(() => {
   const now = Date.now();
   for (const [tabId, used] of attached) {
-    if (now - used > IDLE_DETACH_MS) {
+    if (now - used > (consoleLog.has(tabId) ? RECORDING_DETACH_MS : IDLE_DETACH_MS)) {
       forget(tabId);
       void chrome.debugger.detach({ tabId }).catch(() => undefined);
     }
@@ -266,6 +392,7 @@ async function attach(tabId: number): Promise<void> {
   // A background tab should behave like a focused, running one.
   await cdp(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined);
   await cdp(tabId, "Page.setWebLifecycleState", { state: "active" }).catch(() => undefined);
+  if (consoleLog.has(tabId)) await startRecording(tabId);
 }
 
 function cdp<T = Record<string, unknown>>(tabId: number, method: string, params: Record<string, unknown> = {}, timeoutMs = CDP_TIMEOUT_MS): Promise<T> {
@@ -350,10 +477,23 @@ async function waitForLoad(tabId: number, timeoutMs = LOAD_TIMEOUT_MS): Promise<
 
 /** The page outline; refs continue from the tab's earlier pages. */
 async function snapshot(tabId: number, options: Partial<SnapshotOptions> = {}): Promise<SnapshotResult> {
-  const full: SnapshotOptions = { query: null, offset: 0, maxChars: 15_000, scope: null, lines: false, start: refCounters.get(tabId) ?? 1, ...options };
+  const full: SnapshotOptions = { query: null, offset: 0, maxChars: 15_000, scope: null, interactive: false, start: refCounters.get(tabId) ?? 1, ...options, lines: true };
   const result = await evaluate<SnapshotResult>(tabId, snapshotPage, full);
   refCounters.set(tabId, Math.max(refCounters.get(tabId) ?? 1, result.next));
+  const known = refLines.get(tabId) ?? new Map<string, string>();
+  for (const line of result.lines ?? []) {
+    const match = /^\[(e\d+)\] (.*)$/.exec(line);
+    if (match !== null) known.set(match[1]!, identity(match[2]!));
+  }
+  if (known.size > 5_000) for (const key of [...known.keys()].slice(0, known.size - 5_000)) known.delete(key);
+  refLines.set(tabId, known);
+  if (options.lines !== true) delete result.lines;
   return result;
+}
+
+/** A ref line's role and name, without its state: `button "Save"`. */
+function identity(rest: string): string {
+  return /^\S+ "(?:[^"\\]|\\.)*"(?: hint="(?:[^"\\]|\\.)*")?/.exec(rest)?.[0] ?? rest;
 }
 
 /** The outline's lines, or null when the page cannot be read. */
@@ -389,6 +529,10 @@ function waitForParam(params: { wait_for?: string }): string | null {
 interface ActionStart {
   before: string[] | null;
   targets: string[];
+  /** The refs to act on: the ones asked for, or the element's new ref when it was re-rendered. */
+  refs: string[];
+  /** Refs that were replaced: "e12 → e40". */
+  remapped: string[];
   url: string;
   /** The tab in front in the window, to bring back if the action opens one over it. */
   front: number | undefined;
@@ -412,14 +556,27 @@ async function startAction(tabId: number, refs: string[]): Promise<ActionStart> 
   }
   await waitForLoad(tabId);
   const before = refs.length > 0 ? ((await snapshot(tabId, { lines: true, maxChars: 1 })).lines ?? []) : await outlineLines(tabId);
+  const remapped: string[] = [];
+  const resolved: string[] = [];
   const targets = refs.map((ref) => {
-    const line = before?.find((entry) => entry.startsWith(`[${ref}] `));
-    if (line === undefined) throw staleRef(ref);
+    let line = before?.find((entry) => entry.startsWith(`[${ref}] `));
+    if (line === undefined) {
+      // The page re-rendered the element: take the one element with the same role and name, if there is exactly one.
+      const was = refLines.get(tabId)?.get(ref);
+      const matches = was === undefined ? [] : (before ?? []).filter((entry) => /^\[e\d+\] /.test(entry) && identity(entry.slice(entry.indexOf("] ") + 2)) === was);
+      if (matches.length !== 1) throw staleRef(ref);
+      line = matches[0]!;
+      const now = line.slice(1, line.indexOf("]"));
+      remapped.push(`${ref} → ${now}`);
+      resolved.push(now);
+    } else {
+      resolved.push(ref);
+    }
     return line;
   });
   const tab = await chrome.tabs.get(tabId);
   const [front] = await chrome.tabs.query({ active: true, windowId: tab.windowId });
-  return { before, targets, url: tab.url ?? "", front: front?.id };
+  return { before, targets, refs: resolved, remapped, url: tab.url ?? "", front: front?.id };
 }
 
 /** Keeps tabs an action opened in the background, in the acting tab's group (else the agent's), and says what they hold. */
@@ -481,6 +638,7 @@ async function act(
   const openedTabs = opened.length > 0 ? await placeOpenedTabs(tabId, opened, start, agent) : [];
   return {
     ...(start.targets.length === 1 ? { target: start.targets[0] } : {}),
+    ...(start.remapped.length > 0 ? { remapped: start.remapped } : {}),
     ...own,
     ...outcome,
     ...(dialogs.length > 0 ? { dialogs } : {}),
@@ -489,8 +647,8 @@ async function act(
 }
 
 /** Where a ref is, for a pointer action; it must take space on the page. */
-async function located(tabId: number, ref: string): Promise<Located> {
-  const spot = await evaluate<Located>(tabId, locateRef, ref);
+async function located(tabId: number, ref: string, scroll = true): Promise<Located> {
+  const spot = await evaluate<Located>(tabId, locateRef, { ref, scroll });
   if (!spot.found) throw staleRef(ref);
   if (!spot.visible) {
     throw new Error(`Ref ${ref} takes no space on the page, so it cannot be clicked. Open what shows it (a menu, a tab, a section) and read again.`);
@@ -553,6 +711,63 @@ async function pressKey(tabId: number, combo: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------- input
+
+type Point = { x: number; y: number };
+
+function modifierBits(value: string | undefined): number {
+  let bits = 0;
+  for (const part of (value ?? "").split("+").map((entry) => entry.trim().toLowerCase()).filter((entry) => entry !== "")) {
+    const bit = MODIFIERS[part];
+    if (bit === undefined) throw new Error(`Unknown modifier ${part}. Use ctrl, alt, shift or meta, joined with +.`);
+    bits |= bit;
+  }
+  return bits;
+}
+
+function mouse(tabId: number, type: string, point: Point, extra: Record<string, unknown> = {}): Promise<unknown> {
+  return cdp(tabId, "Input.dispatchMouseEvent", { type, x: point.x, y: point.y, ...extra }, INPUT_TIMEOUT_MS);
+}
+
+/** A trusted click (or double or triple click) at a viewport point. */
+async function clickPoint(tabId: number, point: Point, button: string, count: number, modifiers: number): Promise<void> {
+  await mouse(tabId, "mouseMoved", point, { modifiers });
+  for (let clickCount = 1; clickCount <= count; clickCount++) {
+    await mouse(tabId, "mousePressed", point, { button, clickCount, modifiers });
+    await mouse(tabId, "mouseReleased", point, { button, clickCount, modifiers });
+  }
+}
+
+/** Waiters for Input.dragIntercepted, per tab. */
+const dragWaiters = new Map<number, (data: unknown) => void>();
+
+/** Presses at one point, moves to another and releases. HTML drag and drop is caught and replayed as drag events. */
+async function dragPoints(tabId: number, from: Point, to: Point, modifiers: number): Promise<void> {
+  await cdp(tabId, "Input.setInterceptDrags", { enabled: true }).catch(() => undefined);
+  let dragData: unknown = null;
+  dragWaiters.set(tabId, (data) => {
+    dragData = data;
+  });
+  try {
+    await mouse(tabId, "mouseMoved", from, { modifiers });
+    await mouse(tabId, "mousePressed", from, { button: "left", clickCount: 1, modifiers });
+    const steps = 12;
+    for (let step = 1; step <= steps; step++) {
+      const point = { x: from.x + ((to.x - from.x) * step) / steps, y: from.y + ((to.y - from.y) * step) / steps };
+      await mouse(tabId, "mouseMoved", point, { button: "left", buttons: 1, modifiers });
+      if (dragData !== null) break;
+      await sleep(16);
+    }
+    if (dragData !== null) {
+      for (const type of ["dragEnter", "dragOver", "drop"]) {
+        await cdp(tabId, "Input.dispatchDragEvent", { type, x: to.x, y: to.y, data: dragData, modifiers }, INPUT_TIMEOUT_MS);
+      }
+    }
+    await mouse(tabId, "mouseReleased", to, { button: "left", clickCount: 1, modifiers });
+  } finally {
+    dragWaiters.delete(tabId);
+    await cdp(tabId, "Input.setInterceptDrags", { enabled: false }).catch(() => undefined);
+  }
+}
 
 async function clickRef(tabId: number, ref: string): Promise<Record<string, unknown>> {
   const spot = await located(tabId, ref);
@@ -619,6 +834,56 @@ async function fillField(tabId: number, ref: string, value: unknown): Promise<st
   if (field.kind === "select") return chooseOption(tabId, ref, value);
   if (field.kind === "text") return (await typeInto(tabId, ref, value)).value;
   throw new Error(`Ref ${ref} is not a form field${field.kind === "file" ? " you can fill (it is a file input)" : ""}. Click it with browser_click instead.`);
+}
+
+function base64Of(bytes: Uint8Array): string {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  return btoa(binary);
+}
+
+/** A file's name, type and base64 content, from a URL or from data. */
+async function fileContent(file: UploadFile): Promise<{ name: string; type: string; data: string }> {
+  if (typeof file.url === "string" && file.url !== "") {
+    const response = await fetch(file.url).catch((error: unknown) => {
+      throw new Error(`Could not download ${file.url}: ${message(error)}`);
+    });
+    if (!response.ok) throw new Error(`Fetching ${file.url} answered ${response.status}.`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const fromUrl = decodeURIComponent(new URL(response.url || file.url).pathname.split("/").pop() ?? "") || "file";
+    return { name: file.name || fromUrl, type: file.mime_type || response.headers.get("content-type")?.split(";")[0] || "", data: base64Of(bytes) };
+  }
+  if (typeof file.data === "string" && file.data !== "") {
+    return { name: file.name || "file", type: file.mime_type || "", data: file.data.replace(/^data:[^,]*,/, "") };
+  }
+  throw new Error("Each file needs a path, url or data.");
+}
+
+/** Gives a file input files by their paths on the browser's computer, as if picked in the file dialog. */
+async function setFilePaths(tabId: number, ref: string, paths: string[]): Promise<void> {
+  const response = await cdp<{ result: { objectId?: string } }>(tabId, "Runtime.evaluate", {
+    expression: `(() => { const findRef = ${findRef.toString()}; const pageRoots = ${pageRoots.toString()}; return findRef(${JSON.stringify(ref)}); })()`,
+    contextId: (await worldOf(tabId)).contextId,
+  });
+  const objectId = response.result.objectId;
+  if (objectId === undefined) throw staleRef(ref);
+  await cdp(tabId, "DOM.setFileInputFiles", { files: paths, objectId });
+}
+
+async function upload(tabId: number, ref: string, files: UploadFile[]): Promise<Record<string, unknown>> {
+  const field = await evaluate<FieldKind>(tabId, fieldKind, ref);
+  if (!field.found) throw staleRef(ref);
+  const paths = files.filter((file) => typeof file.path === "string" && file.path !== "");
+  if (paths.length > 0) {
+    if (paths.length !== files.length) throw new Error("Pass every file by path, or none: paths and url/data cannot be mixed.");
+    if (field.kind !== "file") throw new Error(`Ref ${ref} is not a file input: paths only go to a file input. Pass url or data to drop files on it instead.`);
+    await setFilePaths(tabId, ref, paths.map((file) => file.path!));
+    return { files: paths.map((file) => file.path!.split(/[\\/]/).pop()), dropped: false };
+  }
+  const contents = await Promise.all(files.map(fileContent));
+  const result = await evaluate<{ found: boolean; input: boolean; names: string[] }>(tabId, putFiles, { ref, files: contents });
+  if (!result.found) throw staleRef(ref);
+  return { files: result.names, dropped: !result.input };
 }
 
 /** The longest edge a screenshot gets: models scale larger pictures down to about this anyway. */
@@ -700,6 +965,7 @@ async function dispatch(request: BridgeRequest): Promise<unknown> {
         offset: typeof params.offset === "number" ? params.offset : 0,
         maxChars: typeof params.max_chars === "number" ? Math.min(Math.max(params.max_chars, 1_000), 60_000) : 15_000,
         scope: scopeParam(params.scope),
+        interactive: params.interactive === true,
       };
       await waitForLoad(tabId);
       const waitFor = waitForParam(params);
@@ -716,8 +982,111 @@ async function dispatch(request: BridgeRequest): Promise<unknown> {
     case "click": {
       const { params } = request;
       const tabId = await existingTab(params.tab_id);
+      const ref = typeof params.ref === "string" && params.ref !== "" ? params.ref : null;
+      const point = typeof params.x === "number" && typeof params.y === "number" ? { x: params.x, y: params.y } : null;
+      if ((ref === null) === (point === null)) throw new Error("Pass a ref, or x and y (viewport CSS pixels, as in a browser_screenshot), not both.");
+      const button = params.button ?? "left";
+      if (!["left", "right", "middle"].includes(button)) throw new Error("button must be left, right or middle.");
+      const count = params.count ?? 1;
+      if (!Number.isInteger(count) || count < 1 || count > 3) throw new Error("count must be 1, 2 or 3.");
+      const modifiers = modifierBits(params.modifiers);
+      const dragTo = params.drag_to;
+      const plain = button === "left" && count === 1 && modifiers === 0 && params.hover !== true && dragTo === undefined;
+      return act(tabId, agent, ref === null ? [] : [ref], params, async (start) => {
+        const actual = start.refs[0];
+        // A plain click on a ref keeps its DOM fallback for tabs that take no trusted input.
+        if (actual !== undefined && plain) return clickRef(tabId, actual);
+        let from: Point;
+        let covered: string | null = null;
+        let target: string | null = null;
+        if (actual !== undefined) {
+          const spot = await located(tabId, actual);
+          from = { x: spot.x, y: spot.y };
+          covered = spot.covered;
+        } else {
+          from = point!;
+          target = await evaluate<string | null>(tabId, pointAt, from);
+        }
+        const done: Record<string, unknown> = {
+          ...(target !== null ? { target: `point (${from.x}, ${from.y}): ${target}` } : {}),
+          ...(covered !== null ? { covered_by: covered } : {}),
+        };
+        if (params.hover === true) {
+          await mouse(tabId, "mouseMoved", from, { modifiers });
+          return { ...done, did: "hovered" };
+        }
+        if (dragTo !== undefined) {
+          let to: Point;
+          if (typeof dragTo === "string") {
+            const spot = await located(tabId, dragTo, false);
+            to = { x: spot.x, y: spot.y };
+            // Re-measure the start, in case finding the target scrolled the page.
+            if (actual !== undefined) {
+              const again = await located(tabId, actual, false);
+              from = { x: again.x, y: again.y };
+            }
+          } else if (typeof dragTo?.x === "number" && typeof dragTo?.y === "number") {
+            to = { x: dragTo.x, y: dragTo.y };
+          } else {
+            throw new Error("drag_to must be a ref or {x, y}.");
+          }
+          await dragPoints(tabId, from, to, modifiers);
+          return { ...done, did: "dragged", to: typeof dragTo === "string" ? dragTo : `(${to.x}, ${to.y})` };
+        }
+        await clickPoint(tabId, from, button, count, modifiers);
+        const kind = count === 2 ? "double-clicked" : count === 3 ? "triple-clicked" : "clicked";
+        return { ...done, did: button === "left" ? kind : `${button}-${kind}` };
+      });
+    }
+    case "upload": {
+      const { params } = request;
+      const tabId = await existingTab(params.tab_id);
       const ref = required(params.ref, "ref");
-      return act(tabId, agent, [ref], params, () => clickRef(tabId, ref));
+      if (!Array.isArray(params.files) || params.files.length === 0) throw new Error("files must list one or more files.");
+      return act(tabId, agent, [ref], params, (start) => upload(tabId, start.refs[0]!, params.files));
+    }
+    case "logs": {
+      const { params } = request;
+      const tabId = await existingTab(params.tab_id);
+      await attach(tabId);
+      if (!consoleLog.has(tabId)) {
+        consoleLog.set(tabId, []);
+        networkLog.set(tabId, new Map());
+        await startRecording(tabId);
+        return { started: true };
+      }
+      const requests = networkLog.get(tabId)!;
+      if (typeof params.request_id === "string" && params.request_id !== "") {
+        const entry = requests.get(params.request_id);
+        if (entry === undefined) throw new Error(`No recorded request ${params.request_id}. It may be older than the last ${LOG_LIMIT} requests.`);
+        let body: string | undefined;
+        let bodyError: string | undefined;
+        try {
+          const response = await cdp<{ body: string; base64Encoded: boolean }>(tabId, "Network.getResponseBody", { requestId: entry.id });
+          body = response.base64Encoded ? `(binary, ${Math.round((response.body.length * 3) / 4)} bytes)` : response.body;
+        } catch (error) {
+          bodyError = message(error);
+        }
+        return {
+          request: entry,
+          ...(body !== undefined ? { body: body.slice(0, 50_000), body_truncated: body.length > 50_000 } : { body_error: bodyError }),
+        };
+      }
+      const query = params.query?.trim().toLowerCase() ?? "";
+      const limit = Math.min(Math.max(params.limit ?? 50, 1), LOG_LIMIT);
+      const kind = params.kind ?? "console";
+      let entries: unknown[];
+      if (kind === "network") {
+        const all = [...requests.values()].filter((entry) => query === "" || `${entry.method} ${entry.url} ${entry.status ?? ""} ${entry.type}`.toLowerCase().includes(query));
+        entries = all.slice(-limit).map(({ headers: _h, post: _p, responseHeaders: _r, ...rest }) => rest);
+        if (params.clear === true) requests.clear();
+        return { kind, total: all.length, entries };
+      }
+      const logs = consoleLog.get(tabId)!;
+      const all = logs.filter((entry) => query === "" || `${entry.level} ${entry.text}`.toLowerCase().includes(query));
+      entries = all.slice(-limit);
+      if (params.clear === true) logs.length = 0;
+      return { kind, total: all.length, entries };
     }
     case "fill": {
       const { params } = request;

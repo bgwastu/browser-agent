@@ -52,13 +52,14 @@ export const BROWSER_TOOLS: readonly BrowserTool[] = [
     name: "browser_read",
     method: "read",
     description:
-      "Read a tab as a text outline: headings, text, and interactive elements as `[eN] role \"name\"` lines whose refs the other tools take. A ref stays with its element while the element is on the page and unchanged. Same-site frames are included. query keeps matching lines (a ref such as e12 gives that element's line); scope reads only the main region, the open dialog, or the part under a ref; offset continues a long outline. The outline covers the whole page whatever the scroll position.",
+      "Read a tab as a text outline: headings, text, and interactive elements as `[eN] role \"name\"` lines whose refs the other tools take. A control with no name gets a hint (its icon, test id or id). A ref stays with its element while the element is on the page and unchanged. Same-site frames are included. interactive keeps only refs and headings, the cheapest way to find what to act on; query keeps matching lines (a ref such as e12 gives that element's line); scope reads only the main region, the open dialog, or the part under a ref; offset continues a long outline. The outline covers the whole page whatever the scroll position.",
     shape: shape("read", {
       tab_id: tabId,
       query: z.string().optional().describe("Only lines containing this text (case-insensitive), or a ref"),
       scope: z.string().optional().describe('"main", "dialog" (the open modal), or a ref: read only that part'),
       offset: z.number().int().min(0).optional().describe("Character offset from a previous read's next offset"),
       max_chars: z.number().int().min(1_000).max(60_000).optional().describe("Default 15000"),
+      interactive: z.boolean().optional().describe("Only elements with refs, and headings"),
       wait_for: waitFor,
     }),
   },
@@ -66,8 +67,22 @@ export const BROWSER_TOOLS: readonly BrowserTool[] = [
     name: "browser_click",
     method: "click",
     description:
-      "Click an element by ref with trusted input; works while the tab is in the background. Like every action it answers with what changed in the page outline (or the new page), dialogs the page showed (accepted automatically), and tabs it opened.",
-    shape: shape("click", { tab_id: tabId, ref, wait_for: waitFor }),
+      "Click an element by ref, or a point (x, y) from a browser_screenshot, with trusted mouse input; works while the tab is in the background. Also right or middle click (button), double or triple click (count), click with keys held (modifiers), hover only (menus that open on hover), and drag to a ref or point (drag_to; HTML drag and drop works too). If a ref was re-rendered, the one element with the same role and name is used. Like every action it answers with what changed in the page outline (or the new page), dialogs the page showed (accepted automatically), and tabs it opened.",
+    shape: shape("click", {
+      tab_id: tabId,
+      ref: ref.optional(),
+      x: z.number().optional().describe("Viewport x in CSS pixels, as in browser_screenshot; with y instead of ref"),
+      y: z.number().optional(),
+      button: z.enum(["left", "right", "middle"]).optional().describe("Default left"),
+      count: z.number().int().min(1).max(3).optional().describe("2 double-clicks, 3 triple-clicks (selects a paragraph)"),
+      modifiers: z.string().optional().describe("Keys to hold, joined with +: shift, ctrl, alt, meta"),
+      hover: z.boolean().optional().describe("Only move the pointer there"),
+      drag_to: z
+        .union([z.string().min(1), z.object({ x: z.number(), y: z.number() })])
+        .optional()
+        .describe("Press at the ref or point, move to this ref or {x, y}, and release"),
+      wait_for: waitFor,
+    }),
   },
   {
     name: "browser_fill",
@@ -81,6 +96,42 @@ export const BROWSER_TOOLS: readonly BrowserTool[] = [
         .min(1)
         .describe("Fields in the order to fill them"),
       wait_for: waitFor,
+    }),
+  },
+  {
+    name: "browser_upload",
+    method: "upload",
+    description:
+      "Give files to a file input ref (as if picked in the file dialog), or drop them on another ref such as a dropzone. Do not click file inputs or upload buttons: that opens a file dialog you cannot use. Hidden file inputs are listed in browser_read. Each file comes from a path on the browser's computer (file inputs only), a URL the browser downloads, or base64 data.",
+    shape: shape("upload", {
+      tab_id: tabId,
+      ref,
+      files: z
+        .array(
+          z.object({
+            path: z.string().min(1).optional().describe("Absolute path on the computer the browser runs on"),
+            url: z.string().min(1).optional().describe("Downloaded by the browser"),
+            data: z.string().min(1).optional().describe("Base64 content"),
+            name: z.string().min(1).optional().describe("File name; defaults to the path's or URL's"),
+            mime_type: z.string().min(1).optional(),
+          }),
+        )
+        .min(1),
+      wait_for: waitFor,
+    }),
+  },
+  {
+    name: "browser_logs",
+    method: "logs",
+    description:
+      "Read a tab's console (console.* calls, uncaught errors, browser warnings) or its network requests (method, URL, status, type, size). Recording starts with the first call on a tab, which returns nothing yet: reload the tab with browser_navigate to record a page load from its start. Pass request_id for one request's headers, request body and response body, such as an API's JSON. Good for debugging and for finding the API a page calls, to call it with browser_eval.",
+    shape: shape("logs", {
+      tab_id: tabId,
+      kind: z.enum(["console", "network"]).optional().describe("Default console"),
+      query: z.string().optional().describe("Only entries containing this text, such as error or /api/"),
+      limit: z.number().int().min(1).max(500).optional().describe("The latest this many entries; default 50"),
+      clear: z.boolean().optional().describe("Forget the entries of this kind after reading"),
+      request_id: z.string().min(1).optional().describe("A request's id from kind network"),
     }),
   },
   {
@@ -162,6 +213,8 @@ export function formatResult(tool: BrowserTool, result: Record<string, unknown>)
     }
     case "close":
       return `Closed tab ${String(result.closed)}.`;
+    case "logs":
+      return formatLogs(result);
     case "navigate":
       if (result.opened !== undefined) {
         const waited = result.wait_for as ActionResult["wait_for"];
@@ -175,9 +228,70 @@ export function formatResult(tool: BrowserTool, result: Record<string, unknown>)
   }
 }
 
+interface ConsoleLine {
+  level: string;
+  text: string;
+  source?: string;
+}
+interface NetworkLine {
+  id: string;
+  method: string;
+  url: string;
+  type: string;
+  status?: number;
+  mime?: string;
+  size?: number;
+  error?: string;
+}
+
+function size(bytes: number | undefined): string {
+  if (bytes === undefined) return "";
+  return bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} kB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatLogs(result: Record<string, unknown>): string {
+  if (result.started === true) {
+    return "Recording this tab's console and network from now on. Call again to read them; reload the tab (browser_navigate url reload) to record its page load.";
+  }
+  if (result.request !== undefined) {
+    const request = result.request as NetworkLine & { headers?: Record<string, string>; post?: string; responseHeaders?: Record<string, string> };
+    const lines = [`${request.method} ${request.url}`, `Status: ${request.status ?? "(no response)"}${request.error ? ` (${request.error})` : ""}, ${request.type}${request.mime ? `, ${request.mime}` : ""}`];
+    if (request.headers) lines.push("", "Request headers:", ...Object.entries(request.headers).map(([key, value]) => `${key}: ${value}`));
+    if (request.post) lines.push("", "Request body:", request.post);
+    if (request.responseHeaders) lines.push("", "Response headers:", ...Object.entries(request.responseHeaders).map(([key, value]) => `${key}: ${value}`));
+    if (typeof result.body === "string") lines.push("", "Response body:", result.body, ...(result.body_truncated === true ? ["(Cut at 50000 characters.)"] : []));
+    else lines.push("", `No response body: ${String(result.body_error ?? "unavailable")}`);
+    return lines.join("\n");
+  }
+  const entries = Array.isArray(result.entries) ? result.entries : [];
+  const total = typeof result.total === "number" ? result.total : entries.length;
+  const kind = result.kind === "network" ? "requests" : "console entries";
+  if (entries.length === 0) return `No ${kind} recorded${total > 0 ? " match" : " yet"}.`;
+  const lines = [total > entries.length ? `The latest ${entries.length} of ${total} ${kind}:` : `${total} ${kind}:`];
+  if (result.kind === "network") {
+    for (const entry of entries as NetworkLine[]) {
+      const status = entry.error ? `failed (${entry.error})` : entry.status === undefined ? "pending" : String(entry.status);
+      const extra = [entry.mime, size(entry.size)].filter((part) => part !== undefined && part !== "").join(", ");
+      lines.push(`#${entry.id} ${entry.method} ${status} ${entry.type} ${entry.url.slice(0, 300)}${extra ? ` (${extra})` : ""}`);
+    }
+  } else {
+    for (const entry of entries as ConsoleLine[]) lines.push(`[${entry.level}] ${entry.text}${entry.source ? ` (${entry.source})` : ""}`);
+  }
+  return lines.join("\n");
+}
+
 function formatAction(tool: BrowserTool, result: ActionResult & Record<string, unknown>): string {
   const lines: string[] = [];
-  if (tool.method === "click" && result.target !== undefined) lines.push(`Clicked ${result.target}`);
+  for (const entry of Array.isArray(result.remapped) ? (result.remapped as string[]) : []) {
+    lines.push(`(Ref ${entry.replace(" → ", " was re-rendered; used ")}, the element with the same role and name.)`);
+  }
+  if (tool.method === "click" && result.target !== undefined) {
+    const did = typeof result.did === "string" ? result.did : "clicked";
+    lines.push(`${did[0]!.toUpperCase()}${did.slice(1)} ${result.target}${typeof result.to === "string" ? ` to ${result.to}` : ""}`);
+  }
+  if (tool.method === "upload" && Array.isArray(result.files)) {
+    lines.push(`${result.dropped === true ? "Dropped" : "Gave the input"} ${(result.files as string[]).map((name) => quote(name)).join(", ")}${result.target !== undefined ? ` on ${result.target}` : ""}.`);
+  }
   if (tool.method === "key") lines.push("Pressed the key.");
   if (tool.method === "navigate") lines.push("Navigated.");
   if (tool.method === "eval") {

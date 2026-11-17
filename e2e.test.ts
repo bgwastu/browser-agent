@@ -10,7 +10,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { $, type Subprocess } from "bun";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -51,6 +51,26 @@ const FEATURES = `<!doctype html><title>Features</title>
 <iframe title="Embedded" srcdoc="<button onclick=&quot;document.body.insertAdjacentHTML('beforeend', '<p>Frame clicked</p>')&quot;>Frame button</button>" style="width:300px;height:100px"></iframe>
 </main>
 <div role="dialog" aria-label="Cookies"><p>We use cookies</p><button>Accept cookies</button></div>`;
+
+const TOOLKIT = `<!doctype html><title>Toolkit</title>
+<script>function note(text) { const li = document.createElement('li'); li.textContent = 'Log: ' + text; document.getElementById('out').append(li); console.log('note', text); }
+function rerender() { const b = document.createElement('button'); b.textContent = 'Target'; b.onclick = () => note('target'); document.getElementById('box').replaceChildren(b); }</script>
+<button data-testid="trash-btn" onclick="note('trash')"><svg width="16" height="16"><title>Trash</title><rect width="16" height="16"/></svg></button>
+<button oncontextmenu="event.preventDefault(); note('context')">Context me</button>
+<button ondblclick="note('double')">Double me</button>
+<button onmouseenter="note('hovered')">Hover me</button>
+<button onclick="note(event.shiftKey ? 'shift click' : 'plain click')">Mod me</button>
+<button id="point" onclick="note('point click')">Point me</button>
+<div id="box"><button onclick="note('target')">Target</button></div>
+<button onclick="rerender()">Rerender</button>
+<div draggable="true" role="button" ondragstart="event.dataTransfer.setData('text/plain', 'card')">Drag card</div>
+<div role="button" ondragover="event.preventDefault()" ondrop="event.preventDefault(); note('dropped ' + event.dataTransfer.getData('text/plain'))">Drop zone</div>
+<label>Attachment <input type="file" multiple onchange="note('files ' + [...this.files].map((f) => f.name + ':' + f.size).join(','))"></label>
+<div role="button" ondragover="event.preventDefault()" ondrop="event.preventDefault(); note('dropped files ' + [...event.dataTransfer.files].map((f) => f.name).join(','))">File dropzone</div>
+<button onclick="fetch('/api/data?x=1').then((r) => r.json()).then((j) => note('api ' + j.value))">Call API</button>
+<button onclick="console.error('boom here'); setTimeout(() => { throw new Error('kaboom') })">Fail</button>
+<p>Plain paragraph text</p>
+<ul id="out"></ul>`;
 
 function refFor(text: string, pattern: RegExp): string {
   const line = text.split("\n").find((entry) => pattern.test(entry));
@@ -102,7 +122,9 @@ describe.skipIf(!enabled)("browser-agent end to end", () => {
       hostname: "127.0.0.1",
       fetch(request) {
         const path = new URL(request.url).pathname;
-        const html = ({ "/second": SECOND, "/features": FEATURES, "/panel": PANEL } as Record<string, string>)[path] ?? FORM;
+        if (path === "/api/data") return Response.json({ value: 42 });
+        if (path === "/files/report.txt") return new Response("from a url", { headers: { "content-type": "text/plain" } });
+        const html = ({ "/second": SECOND, "/features": FEATURES, "/panel": PANEL, "/toolkit": TOOLKIT } as Record<string, string>)[path] ?? FORM;
         return new Response(html, { headers: { "content-type": "text/html" } });
       },
     });
@@ -148,10 +170,13 @@ describe.skipIf(!enabled)("browser-agent end to end", () => {
 
   let tabId: number;
 
-  it("lists the nine tools", async () => {
+  it("lists the eleven tools", async () => {
     const { tools } = await (await client("research")).listTools();
     expect(tools.map((tool) => tool.name).sort()).toEqual(
-      ["browser_click", "browser_close", "browser_eval", "browser_fill", "browser_key", "browser_navigate", "browser_read", "browser_screenshot", "browser_tabs"].sort(),
+      [
+        "browser_click", "browser_close", "browser_eval", "browser_fill", "browser_key", "browser_logs", "browser_navigate", "browser_read",
+        "browser_screenshot", "browser_tabs", "browser_upload",
+      ].sort(),
     );
   });
 
@@ -218,6 +243,85 @@ describe.skipIf(!enabled)("browser-agent end to end", () => {
     const other = tabIdIn(opened);
     expect(await call("browser_tabs", {}, "shopping")).toContain(`tab ${other}: Second — ${base}/second [group: shopping]`);
     await call("browser_close", { tab_id: other }, "shopping");
+  });
+
+  describe("on a page with mouse, file and log features", () => {
+    let tab: number;
+    let page: string;
+
+    beforeAll(async () => {
+      tab = tabIdIn(await call("browser_navigate", { url: `${base}/toolkit`, group: "Toolkit" }));
+      page = await call("browser_read", { tab_id: tab });
+    });
+
+    it("hints at unnamed controls, and reads only interactive lines", async () => {
+      expect(page).toMatch(/\[e\d+\] button "" hint="icon:Trash; testid:trash-btn"/);
+      const interactive = await call("browser_read", { tab_id: tab, interactive: true });
+      expect(interactive).toContain('button "Point me"');
+      expect(interactive).not.toContain("Plain paragraph text");
+    });
+
+    it("right-clicks, double-clicks, hovers and clicks with a modifier", async () => {
+      expect(await call("browser_click", { tab_id: tab, ref: refFor(page, /"Context me"/), button: "right" })).toContain("+ - Log: context");
+      expect(await call("browser_click", { tab_id: tab, ref: refFor(page, /"Double me"/), count: 2 })).toContain("+ - Log: double");
+      const hovered = await call("browser_click", { tab_id: tab, ref: refFor(page, /"Hover me"/), hover: true });
+      expect(hovered).toContain("Hovered [");
+      expect(hovered).toContain("+ - Log: hovered");
+      expect(await call("browser_click", { tab_id: tab, ref: refFor(page, /"Mod me"/), modifiers: "shift" })).toContain("+ - Log: shift click");
+    });
+
+    it("clicks a point", async () => {
+      const box = await call("browser_eval", { tab_id: tab, code: "const r = document.getElementById('point').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]" });
+      const [x, y] = JSON.parse(box.slice(box.indexOf("["), box.indexOf("]") + 1)) as [number, number];
+      const clicked = await call("browser_click", { tab_id: tab, x, y });
+      expect(clicked).toContain('"Point me"');
+      expect(clicked).toContain("+ - Log: point click");
+    });
+
+    it("finds a re-rendered element by its role and name", async () => {
+      const target = refFor(page, /button "Target"/);
+      await call("browser_click", { tab_id: tab, ref: refFor(page, /"Rerender"/) });
+      const clicked = await call("browser_click", { tab_id: tab, ref: target });
+      expect(clicked).toContain(`Ref ${target} was re-rendered; used e`);
+      expect(clicked).toContain("+ - Log: target");
+    });
+
+    it("drags with HTML drag and drop", async () => {
+      const dragged = await call("browser_click", { tab_id: tab, ref: refFor(page, /"Drag card"/), drag_to: refFor(page, /button "Drop zone"/) });
+      expect(dragged).toContain("+ - Log: dropped card");
+    });
+
+    it("uploads files by path, URL and data, and drops them", async () => {
+      const input = refFor(page, /file "Attachment/);
+      const path = join(work, "notes.txt");
+      writeFileSync(path, "hello");
+      expect(await call("browser_upload", { tab_id: tab, ref: input, files: [{ path }] })).toContain("+ - Log: files notes.txt:5");
+      const both = await call("browser_upload", {
+        tab_id: tab,
+        ref: input,
+        files: [{ url: `${base}/files/report.txt` }, { data: btoa("abc"), name: "a.txt", mime_type: "text/plain" }],
+      });
+      expect(both).toContain("+ - Log: files report.txt:10,a.txt:3");
+      const dropped = await call("browser_upload", { tab_id: tab, ref: refFor(page, /"File dropzone"/), files: [{ data: btoa("x"), name: "drop.png" }] });
+      expect(dropped).toContain("Dropped");
+      expect(dropped).toContain("+ - Log: dropped files drop.png");
+    });
+
+    it("records console messages, errors and network requests", async () => {
+      expect(await call("browser_logs", { tab_id: tab })).toContain("Recording");
+      await call("browser_click", { tab_id: tab, ref: refFor(page, /"Fail"/) });
+      await call("browser_click", { tab_id: tab, ref: refFor(page, /"Call API"/), wait_for: "api 42" });
+      const logs = await call("browser_logs", { tab_id: tab });
+      expect(logs).toContain("[error] boom here");
+      expect(logs).toContain("kaboom");
+      expect(logs).toContain("[log] note api 42");
+      const network = await call("browser_logs", { tab_id: tab, kind: "network", query: "/api/" });
+      expect(network).toMatch(/#\S+ GET 200 Fetch http:\/\/127\.0\.0\.1:\d+\/api\/data\?x=1/);
+      const id = /#(\S+) GET/.exec(network)![1]!;
+      const detail = await call("browser_logs", { tab_id: tab, request_id: id });
+      expect(detail).toContain('{"value":42}');
+      await call("browser_close", { tab_id: tab });
+    });
   });
 
   describe("on a page with dialogs, frames and late content", () => {

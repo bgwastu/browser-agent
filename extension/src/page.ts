@@ -45,6 +45,8 @@ export interface SnapshotOptions {
   start: number;
   /** Return the outline's lines too, for comparing before and after an action. */
   lines: boolean;
+  /** Keep only lines with refs, and headings. */
+  interactive: boolean;
 }
 
 export interface SnapshotResult {
@@ -230,6 +232,31 @@ export function snapshotPage(options: SnapshotOptions): SnapshotResult {
     return element.getAttribute("title") ?? element.querySelector("img[alt]")?.getAttribute("alt") ?? "";
   };
 
+  /** For a control with no name (an icon button): what the markup says about it. */
+  const hintOf = (element: Element): string => {
+    const parts: string[] = [];
+    const inner = element.querySelector("svg title, [aria-label], img[alt], img[src], use[href], use[*|href]");
+    if (inner !== null) {
+      const text =
+        inner.tagName.toLowerCase() === "title"
+          ? inner.textContent
+          : inner.getAttribute("aria-label") ?? inner.getAttribute("alt") ?? inner.getAttribute("href") ?? inner.getAttribute("xlink:href") ?? inner.getAttribute("src");
+      const short = clean(text, 60).replace(/^.*[/#]/, "").replace(/\.(svg|png|jpe?g|gif|webp)(\?.*)?$/i, "");
+      if (short !== "") parts.push(`icon:${short}`);
+    }
+    const iconClass = Array.from(element.querySelectorAll("[class]"))
+      .concat(element)
+      .flatMap((node) => Array.from(node.classList))
+      .find((name) => /icon|fa-|glyph|symbol/i.test(name) && name.length < 40);
+    if (iconClass !== undefined && parts.length === 0) parts.push(`icon:${iconClass}`);
+    const testId = element.getAttribute("data-testid") ?? element.getAttribute("data-test-id") ?? element.getAttribute("data-test");
+    if (testId) parts.push(`testid:${clean(testId, 40)}`);
+    else if (element.id && !/\d{3,}|^[:_]/.test(element.id)) parts.push(`id:${clean(element.id, 40)}`);
+    const name = element.getAttribute("name");
+    if (name) parts.push(`name:${clean(name, 40)}`);
+    return parts.length > 0 ? ` hint=${quoted(parts.join("; "))}` : "";
+  };
+
   const stateOf = (element: Element, role: string): string => {
     const parts: string[] = [];
     const tag = element.tagName;
@@ -326,7 +353,7 @@ export function snapshotPage(options: SnapshotOptions): SnapshotResult {
     if (role !== null && INTERACTIVE.has(role)) {
       const name = clean(nameOf(element), 100);
       const ref = refFor(element, role, `${role} ${quoted(name)}`);
-      push(`[${ref}] ${role} ${quoted(name)}${stateOf(element, role)}${hiddenFile ? " hidden" : ""}`);
+      push(`[${ref}] ${role} ${quoted(name)}${name === "" ? hintOf(element) : ""}${stateOf(element, role)}${hiddenFile ? " hidden" : ""}`);
       if (role !== "listbox" && role !== "combobox") return;
       if (element.tagName === "SELECT") return;
     } else if (role === "heading") {
@@ -403,9 +430,12 @@ export function snapshotPage(options: SnapshotOptions): SnapshotResult {
   } else if (refQuery !== undefined) {
     body = lines.filter((line) => line.startsWith(`[${refQuery}] `));
     if (body.length === 0) body = [`(No element has ref ${refQuery} now: it is gone or changed. Read again without query.)`];
-  } else if (query !== null && query !== "") {
-    body = lines.filter((line) => line.toLowerCase().includes(query));
-    if (body.length === 0) body = [`(No line contains ${quoted(options.query ?? "")}; the page has ${lines.length} lines. Try another word, or read without query.)`];
+  } else {
+    if (options.interactive) body = body.filter((line) => line.startsWith("[e") || line.startsWith("#"));
+    if (query !== null && query !== "") {
+      body = body.filter((line) => line.toLowerCase().includes(query));
+      if (body.length === 0) body = [`(No line contains ${quoted(options.query ?? "")}; the page has ${lines.length} lines. Try another word, or read without query.)`];
+    }
   }
   const full = [...header, ...body].join("\n");
   const start = Math.max(0, options.offset);
@@ -436,10 +466,11 @@ export interface Located {
 }
 
 /** Scrolls the ref into view and returns its center in the tab's viewport, in CSS pixels. */
-export function locateRef(ref: string): Located {
+export function locateRef(arg: string | { ref: string; scroll: boolean }): Located {
+  const ref = typeof arg === "string" ? arg : arg.ref;
   const element = findRef(ref);
   if (element === null) return { found: false, visible: false, x: 0, y: 0, covered: null };
-  element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+  if (typeof arg === "string" || arg.scroll) element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
   const rect = element.getBoundingClientRect();
   let x = rect.left + rect.width / 2;
   let y = rect.top + rect.height / 2;
@@ -625,3 +656,58 @@ export function fieldKind(ref: string): FieldKind {
   return { found: true, kind: "other", checked: false };
 }
 
+
+/** What is at a viewport point (CSS px), for reporting what a click at coordinates hit. */
+export function pointAt(point: { x: number; y: number }): string | null {
+  let doc: Document = document;
+  let x = point.x;
+  let y = point.y;
+  let hit = doc.elementFromPoint(x, y);
+  // Into same-origin frames.
+  while (hit !== null && (hit.tagName === "IFRAME" || hit.tagName === "FRAME")) {
+    let inner: Document | null = null;
+    try {
+      inner = (hit as HTMLIFrameElement).contentDocument;
+    } catch {
+      break;
+    }
+    if (inner === null) break;
+    const box = hit.getBoundingClientRect();
+    x -= box.left + hit.clientLeft;
+    y -= box.top + hit.clientTop;
+    doc = inner;
+    hit = doc.elementFromPoint(x, y);
+  }
+  if (hit === null) return null;
+  const target = hit.closest("[data-agent-ref]");
+  const text = ((target ?? hit) as HTMLElement).innerText?.replace(/\s+/g, " ").trim().slice(0, 80) ?? "";
+  const label = (target ?? hit).getAttribute("aria-label");
+  const tag = hit.tagName.toLowerCase();
+  return `${target !== null ? `[${target.getAttribute("data-agent-ref")}] ` : ""}<${tag}${hit.id ? `#${hit.id}` : ""}> ${JSON.stringify(label ?? text)}`;
+}
+
+/** Gives files to a file input (as if picked), or drops them on any other element. */
+export function putFiles(args: { ref: string; files: Array<{ name: string; type: string; data: string }> }): { found: boolean; input: boolean; names: string[] } {
+  const element = findRef(args.ref);
+  if (element === null) return { found: false, input: false, names: [] };
+  const transfer = new DataTransfer();
+  for (const file of args.files) {
+    const bytes = Uint8Array.from(atob(file.data), (char) => char.charCodeAt(0));
+    transfer.items.add(new File([bytes], file.name, { type: file.type, lastModified: Date.now() }));
+  }
+  const names = Array.from(transfer.files).map((file) => file.name);
+  if (element.tagName === "INPUT" && (element as HTMLInputElement).type === "file") {
+    const input = element as HTMLInputElement;
+    input.files = transfer.files;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return { found: true, input: true, names };
+  }
+  element.scrollIntoView({ block: "center", behavior: "instant" });
+  const rect = element.getBoundingClientRect();
+  const at = { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+  for (const type of ["dragenter", "dragover", "drop"]) {
+    element.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, composed: true, dataTransfer: transfer, ...at }));
+  }
+  return { found: true, input: false, names };
+}

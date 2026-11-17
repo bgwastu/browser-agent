@@ -8,8 +8,25 @@ export interface BridgeParams {
   /** `group` titles the tab group a new tab goes into; it defaults to the agent's name. */
   navigate: { tab_id?: number; url: string; group?: string; wait_for?: string };
   /** `scope` is "main", "dialog" or a ref; `wait_for` waits up to 10 s for text to appear first. */
-  read: { tab_id: number; query?: string; offset?: number; max_chars?: number; scope?: string; wait_for?: string };
-  click: { tab_id: number; ref: string; wait_for?: string };
+  /** `interactive` keeps only lines with refs, and headings. */
+  read: { tab_id: number; query?: string; offset?: number; max_chars?: number; scope?: string; interactive?: boolean; wait_for?: string };
+  /** A ref, or a viewport point (CSS px, as in a screenshot). `hover` only moves the pointer there; `drag_to` presses, moves there and releases. */
+  click: {
+    tab_id: number;
+    ref?: string;
+    x?: number;
+    y?: number;
+    button?: "left" | "right" | "middle";
+    count?: number;
+    modifiers?: string;
+    hover?: boolean;
+    drag_to?: string | { x: number; y: number };
+    wait_for?: string;
+  };
+  /** Each file comes from a path on the browser's computer, a URL, or base64 data. */
+  upload: { tab_id: number; ref: string; files: UploadFile[]; wait_for?: string };
+  /** Console messages and page errors, or network requests, recorded since the first call on the tab. `request_id` gives one request's details and response body. */
+  logs: { tab_id: number; kind?: "console" | "network"; query?: string; limit?: number; clear?: boolean; request_id?: string };
   /** Each field is typed into (replacing), chosen in, or ticked (true) or cleared (false). */
   fill: { tab_id: number; fields: Array<{ ref: string; value: string | boolean }>; wait_for?: string };
   key: { tab_id: number; key: string; wait_for?: string };
@@ -18,6 +35,15 @@ export interface BridgeParams {
   close: { tab_id: number };
   /** `code` is a function body: it may `await` and `return` a JSON-serializable value. */
   eval: { tab_id: number; code: string; world?: "isolated" | "main"; wait_for?: string };
+}
+
+export interface UploadFile {
+  path?: string;
+  url?: string;
+  /** Base64 file content. */
+  data?: string;
+  name?: string;
+  mime_type?: string;
 }
 
 export type BridgeMethod = keyof BridgeParams;
