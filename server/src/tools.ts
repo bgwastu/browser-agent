@@ -275,7 +275,9 @@ function formatLogs(result: Record<string, unknown>): string {
       lines.push(`#${entry.id} ${entry.method} ${status} ${entry.type} ${entry.url.slice(0, 300)}${extra ? ` (${extra})` : ""}`);
     }
   } else {
-    for (const entry of entries as ConsoleLine[]) lines.push(`[${entry.level}] ${entry.text}${entry.source ? ` (${entry.source})` : ""}`);
+    for (const entry of entries as ConsoleLine[]) {
+      lines.push(entry.level === "navigated" ? `--- page loaded: ${entry.text}` : `[${entry.level}] ${entry.text}${entry.source ? ` (${entry.source})` : ""}`);
+    }
   }
   return lines.join("\n");
 }
@@ -303,7 +305,9 @@ function formatAction(tool: BrowserTool, result: ActionResult & Record<string, u
   if (tool.method === "fill" && Array.isArray(result.fields)) {
     lines.push(`Filled ${(result.fields as Array<{ ref: string; value: string }>).map((field) => `${field.ref} = ${quote(field.value)}`).join(", ")}.`);
   }
-  for (const dialog of result.dialogs ?? []) lines.push(`The page showed a ${dialog.type} dialog, accepted automatically: ${quote(dialog.message)}`);
+  for (const dialog of result.dialogs ?? []) {
+    lines.push(`The page showed ${/^[aeiou]/i.test(dialog.type) ? "an" : "a"} ${dialog.type} dialog, accepted automatically: ${quote(dialog.message)}`);
+  }
   for (const tab of result.opened_tabs ?? []) lines.push(`It opened ${tabLine(tab)}, in the background; use its tab_id to read it.`);
   if (result.wait_for !== undefined) {
     lines.push(result.wait_for.found ? `${quote(result.wait_for.text)} appeared.` : `${quote(result.wait_for.text)} did not appear within 10 s.`);
@@ -314,7 +318,7 @@ function formatAction(tool: BrowserTool, result: ActionResult & Record<string, u
       lines.push("", "The page changed; its outline now:", changes.outline);
       if (changes.truncated === true) lines.push("(Cut short: browser_read for the rest.)");
     } else if (changes.added.length + changes.removed.length === 0) {
-      if (result.opened_tabs === undefined && tool.method !== "eval") {
+      if (result.opened_tabs === undefined && result.dialogs === undefined && tool.method !== "eval" && tool.method !== "upload") {
         lines.push("The page outline did not change. If something should have happened, it may still be loading (pass wait_for), or check with browser_screenshot.");
       }
     } else {

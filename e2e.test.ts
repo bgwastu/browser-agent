@@ -63,7 +63,7 @@ function rerender() { const b = document.createElement('button'); b.textContent 
 <button id="point" onclick="note('point click')">Point me</button>
 <div id="box"><button onclick="note('target')">Target</button></div>
 <button onclick="rerender()">Rerender</button>
-<div draggable="true" role="button" ondragstart="event.dataTransfer.setData('text/plain', 'card')">Drag card</div>
+<div draggable="true" ondragstart="event.dataTransfer.setData('text/plain', 'card')">Drag card</div>
 <div role="button" ondragover="event.preventDefault()" ondrop="event.preventDefault(); note('dropped ' + event.dataTransfer.getData('text/plain'))">Drop zone</div>
 <label>Attachment <input type="file" multiple onchange="note('files ' + [...this.files].map((f) => f.name + ':' + f.size).join(','))"></label>
 <div role="button" ondragover="event.preventDefault()" ondrop="event.preventDefault(); note('dropped files ' + [...event.dataTransfer.files].map((f) => f.name).join(','))">File dropzone</div>
@@ -287,7 +287,7 @@ describe.skipIf(!enabled)("browser-agent end to end", () => {
     });
 
     it("drags with HTML drag and drop", async () => {
-      const dragged = await call("browser_click", { tab_id: tab, ref: refFor(page, /"Drag card"/), drag_to: refFor(page, /button "Drop zone"/) });
+      const dragged = await call("browser_click", { tab_id: tab, ref: refFor(page, /draggable "Drag card"/), drag_to: refFor(page, /button "Drop zone"/) });
       expect(dragged).toContain("+ - Log: dropped card");
     });
 
@@ -320,6 +320,8 @@ describe.skipIf(!enabled)("browser-agent end to end", () => {
       const id = /#(\S+) GET/.exec(network)![1]!;
       const detail = await call("browser_logs", { tab_id: tab, request_id: id });
       expect(detail).toContain('{"value":42}');
+      await call("browser_navigate", { tab_id: tab, url: "reload" });
+      expect(await call("browser_logs", { tab_id: tab, query: "navigated" })).toContain("--- page loaded: http://127.0.0.1");
       await call("browser_close", { tab_id: tab });
     });
   });

@@ -120,7 +120,7 @@ export function snapshotPage(options: SnapshotOptions): SnapshotResult {
   const NEXT = "data-agent-next";
   const INTERACTIVE = new Set([
     "button", "link", "checkbox", "radio", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option",
-    "switch", "combobox", "listbox", "textbox", "searchbox", "slider", "spinbutton", "treeitem", "file",
+    "switch", "combobox", "listbox", "textbox", "searchbox", "slider", "spinbutton", "treeitem", "file", "draggable",
   ]);
   // Roles whose name may follow their value; their refs survive a name change.
   const VALUE_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider"]);
@@ -186,6 +186,8 @@ export function snapshotPage(options: SnapshotOptions): SnapshotResult {
     }
     if ((element as HTMLElement).isContentEditable && element.hasAttribute("contenteditable")) return "textbox";
     if (/^H[1-6]$/.test(tag)) return "heading";
+    // Something to drag (a card, a list item): browser_click drags it with drag_to.
+    if (element.getAttribute("draggable") === "true") return "draggable";
     return null;
   };
 
@@ -681,7 +683,7 @@ export function pointAt(point: { x: number; y: number }): string | null {
   if (hit === null) return null;
   const target = hit.closest("[data-agent-ref]");
   const text = ((target ?? hit) as HTMLElement).innerText?.replace(/\s+/g, " ").trim().slice(0, 80) ?? "";
-  const label = (target ?? hit).getAttribute("aria-label");
+  const label = (target ?? hit).getAttribute("aria-label") ?? (hit.getAttribute("alt") || null) ?? (hit.tagName === "IMG" ? (hit as HTMLImageElement).src.split("/").pop()?.split("?")[0] ?? null : null);
   const tag = hit.tagName.toLowerCase();
   return `${target !== null ? `[${target.getAttribute("data-agent-ref")}] ` : ""}<${tag}${hit.id ? `#${hit.id}` : ""}> ${JSON.stringify(label ?? text)}`;
 }

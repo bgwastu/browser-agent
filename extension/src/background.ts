@@ -256,19 +256,21 @@ function recordEvent(tabId: number, method: string, params: Record<string, unkno
     case "Runtime.consoleAPICalled": {
       const args = (params.args as Array<Parameters<typeof remoteText>[0]>) ?? [];
       const frame = (params.stackTrace as { callFrames?: Array<{ url: string; lineNumber: number }> } | undefined)?.callFrames?.[0];
+      const text = args.map(remoteText).join(" ").slice(0, 4_000);
       capped(logs, {
         level: String(params.type ?? "log"),
-        text: args.map(remoteText).join(" ").slice(0, 4_000),
-        ...(frame?.url ? { source: `${frame.url}:${frame.lineNumber + 1}` } : {}),
+        text,
+        ...(frame?.url && !text.includes(frame.url) ? { source: `${frame.url}:${frame.lineNumber + 1}` } : {}),
       });
       break;
     }
     case "Runtime.exceptionThrown": {
       const details = (params.exceptionDetails ?? {}) as { text?: string; exception?: { description?: string }; url?: string; lineNumber?: number };
+      const text = (details.exception?.description ?? details.text ?? "").slice(0, 4_000);
       capped(logs, {
         level: "exception",
-        text: (details.exception?.description ?? details.text ?? "").slice(0, 4_000),
-        ...(details.url ? { source: `${details.url}:${(details.lineNumber ?? 0) + 1}` } : {}),
+        text,
+        ...(details.url && !text.includes(details.url) ? { source: `${details.url}:${(details.lineNumber ?? 0) + 1}` } : {}),
       });
       break;
     }
@@ -278,8 +280,15 @@ function recordEvent(tabId: number, method: string, params: Record<string, unkno
       capped(logs, { level: entry.level ?? "log", text: `${entry.text ?? ""}`.slice(0, 4_000), ...(entry.url ? { source: entry.url } : {}) });
       break;
     }
+    case "Page.frameNavigated": {
+      const frame = (params.frame ?? {}) as { parentId?: string; url?: string };
+      if (frame.parentId === undefined) capped(logs, { level: "navigated", text: frame.url ?? "" });
+      break;
+    }
     case "Network.requestWillBeSent": {
       const request = (params.request ?? {}) as { method?: string; url?: string; headers?: Record<string, string>; postData?: string };
+      // Other extensions' content scripts load from their own origin: not the page's traffic.
+      if (/^(chrome|brave|edge)-extension:|^data:/.test(request.url ?? "")) break;
       const id = String(params.requestId);
       requests.set(id, {
         id,
