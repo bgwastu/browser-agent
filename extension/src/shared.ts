@@ -70,3 +70,12 @@ export interface ActionResult {
   opened_tabs?: TabInfo[];
   wait_for?: { text: string; found: boolean };
 }
+
+/** chrome.storage.local key of the server URL set in the popup. */
+export const SERVER_URL_KEY = "serverUrl";
+
+/** What the popup shows about the connection to the server. */
+export interface ConnectionStatus {
+  state: "off" | "connecting" | "connected" | "error";
+  error?: string;
+}

@@ -10,7 +10,7 @@ import { cp, rm, writeFile } from "node:fs/promises";
 const root = new URL(".", import.meta.url).pathname;
 const url = process.env.SERVER_URL ?? "";
 const out = process.env.OUT_DIR ?? `${root}dist`;
-if (url === "") console.warn("SERVER_URL is not set: the extension will not connect anywhere.");
+if (url === "") console.log("SERVER_URL is not set: set the server URL in the extension popup.");
 else if (!/^wss?:\/\//.test(url)) throw new Error(`SERVER_URL must start with ws:// or wss://, got ${url}`);
 
 await rm(out, { recursive: true, force: true });

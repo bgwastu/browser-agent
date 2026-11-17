@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 340px; margin: 0; padding: 14px; font: 13px system-ui, sans-serif; color: #222; }
+  h1 { font-size: 14px; margin: 0 0 10px; }
+  label { display: block; margin-bottom: 4px; color: #555; }
+  input { box-sizing: border-box; width: 100%; padding: 6px 8px; font: 12px ui-monospace, monospace; border: 1px solid #bbb; border-radius: 6px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  button { padding: 5px 12px; border-radius: 6px; border: 1px solid #888; background: #fff; cursor: pointer; }
+  #status { margin-top: 10px; display: flex; gap: 6px; align-items: center; }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: #aaa; flex: none; }
+  #dot.connected { background: #2a2; } #dot.connecting { background: #e90; } #dot.error { background: #d33; }
+  #hint { color: #888; font-size: 11px; margin-top: 6px; }
+  @media (prefers-color-scheme: dark) { body { background: #222; color: #eee; } input, button { background: #333; color: #eee; border-color: #555; } label, #hint { color: #aaa; } }
+</style>
+</head>
+<body>
+  <h1>Browser Agent</h1>
+  <form id="form">
+    <label for="url">Server URL</label>
+    <input id="url" placeholder="wss://example.com/ext/<secret>" spellcheck="false" autocomplete="off">
+    <div class="row"><button type="submit">Save</button><span id="saved"></span></div>
+  </form>
+  <div id="status"><span id="dot"></span><span id="text">…</span></div>
+  <div id="hint">The extension's endpoint on your browser-agent server: /ext/&lt;SECRET&gt;. https:// works too.</div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

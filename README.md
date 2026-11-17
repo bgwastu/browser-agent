@@ -62,16 +62,17 @@ Behind a reverse proxy, make sure the proxy passes WebSocket upgrades through on
 
 ## Install the extension
 
-The server URL is compiled into the extension:
-
 ```sh
-SERVER_URL=wss://browser.example.com/ext/<SECRET> bun run build:extension
-# local: SERVER_URL=ws://127.0.0.1:3000/ext/<SECRET>
+bun run build:extension
 ```
 
-Then in Chrome (version 116 or later), go to `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and pick `extension/dist`.
+In Chrome (116+) or Brave, open `chrome://extensions` (`brave://extensions`), turn on **Developer mode**, click **Load unpacked** and pick `extension/dist`.
 
-The extension reconnects by itself. While it is driving a tab, Chrome shows a "started debugging this browser" bar.
+Click the extension's icon, paste the server's extension URL, `https://<host>/ext/<SECRET>` (or `wss://…`), and press **Save**. The popup shows whether it is connected. It reconnects on its own.
+
+To bake a default URL into a build instead (the popup still overrides it): `SERVER_URL=wss://<host>/ext/<SECRET> bun run build:extension`.
+
+While it is driving a tab, Chrome shows a "started debugging this browser" bar.
 
 ## Connect an agent
 
@@ -106,7 +107,7 @@ The end-to-end test starts the server, builds the extension against it, loads th
 Layout:
 
 - `server/src`: Bun server (`server.ts`), extension bridge (`bridge.ts`), MCP tool definitions (`tools.ts`)
-- `extension/src`: service worker (`background.ts`), in-page functions (`page.ts`, `outline.ts`), wire protocol (`shared.ts`)
+- `extension/src`: service worker (`background.ts`), popup (`popup.ts`), in-page functions (`page.ts`, `outline.ts`), wire protocol (`shared.ts`)
 
 ## License
 

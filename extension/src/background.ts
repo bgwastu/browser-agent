@@ -18,7 +18,7 @@ import {
 } from "./page.js";
 import { diffOutline } from "./outline.js";
 import { SERVER_URL } from "./config.js";
-import type { ActionResult, BridgeMessage, BridgeRequest, PageDialog, TabInfo } from "./shared.js";
+import { SERVER_URL_KEY, type ActionResult, type BridgeMessage, type BridgeRequest, type ConnectionStatus, type PageDialog, type TabInfo } from "./shared.js";
 
 const CDP_VERSION = "1.3";
 const CDP_TIMEOUT_MS = 10_000;
@@ -51,17 +51,42 @@ function browserName(): string {
 
 let socket: WebSocket | null = null;
 let retryMs = 1_000;
+/** The URL set in the popup, else the one built in; undefined until storage was read. */
+let serverUrl: string | undefined;
+let status: ConnectionStatus = { state: "off" };
 
 function send(message: BridgeMessage): void {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 }
 
+async function loadServerUrl(): Promise<string> {
+  const stored = (await chrome.storage.local.get(SERVER_URL_KEY))[SERVER_URL_KEY];
+  serverUrl = typeof stored === "string" && stored !== "" ? stored : SERVER_URL;
+  return serverUrl;
+}
+
 function connect(): void {
-  if (SERVER_URL === "" || socket !== null) return;
-  const next = new WebSocket(SERVER_URL);
+  if (socket !== null) return;
+  if (serverUrl === undefined) {
+    void loadServerUrl().then(connect);
+    return;
+  }
+  if (serverUrl === "") {
+    status = { state: "off" };
+    return;
+  }
+  let next: WebSocket;
+  try {
+    next = new WebSocket(serverUrl);
+  } catch (error) {
+    status = { state: "error", error: message(error) };
+    return;
+  }
   socket = next;
+  status = { state: "connecting", error: status.error };
   next.onopen = () => {
     retryMs = 1_000;
+    status = { state: "connected" };
     send({ type: "hello", browser: browserName(), version: /Chrome\/([\d.]+)/.exec(navigator.userAgent)?.[1] ?? "", extension: chrome.runtime.getManifest().version });
   };
   next.onmessage = (event) => {
@@ -73,12 +98,33 @@ function connect(): void {
     }
     if (typeof request.id === "string") void handle(request);
   };
-  next.onclose = () => {
-    if (socket === next) socket = null;
+  next.onclose = (event) => {
+    if (socket !== next) return;
+    socket = null;
+    status = { state: "error", error: status.state === "connected" ? "Disconnected; retrying." : `Could not connect (code ${event.code}); retrying.` };
     setTimeout(connect, retryMs);
     retryMs = Math.min(retryMs * 2, 30_000);
   };
 }
+
+/** Drops the current connection and connects to the URL now in storage. */
+function reconnect(): void {
+  const old = socket;
+  socket = null;
+  old?.close();
+  retryMs = 1_000;
+  serverUrl = undefined;
+  connect();
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && SERVER_URL_KEY in changes) reconnect();
+});
+
+chrome.runtime.onMessage.addListener((request: unknown, _sender, reply) => {
+  if ((request as { type?: string } | null)?.type !== "status") return;
+  reply({ ...status, url: serverUrl ?? "" });
+});
 
 async function handle(request: BridgeRequest): Promise<void> {
   try {
