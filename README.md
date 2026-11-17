@@ -1,123 +1,113 @@
-# Desktop & Browser Agent for bb
+# browser-agent
 
-Computer use for [bb](https://getbb.app) agents: they use desktop apps and
-browsers on your machine, in the background, powered by
-[Cua Driver](https://cua.ai/docs) from Cua AI. A Chrome extension lets them
-work in your own browser tabs too.
+An MCP server that lets AI agents drive your real browser through a Chrome extension.
 
-A community plugin, not affiliated with or endorsed by Cua AI, Inc. or the bb
-team. See [NOTICE.md](NOTICE.md).
+```
+agent ──MCP (HTTP)──▶ browser-agent server ◀──WebSocket── Chrome extension ──▶ your tabs
+```
 
-![Desktop & Browser Agent settings in bb](docs/screenshots/1-overview.png)
+- The extension connects **out** to the server, so the server can run anywhere: your laptop, a VPS, or a PaaS.
+- Every agent gets its **own tab group**, titled with the agent's name. Tabs it opens, or that its clicks open, land in that group.
+- Agents read pages as a compact outline with `[eN]` refs. After every action they get a diff of what changed.
+- One browser at a time. If a second extension connects, it replaces the first.
 
-## Features
+Forked from [qwadrox/bb-plugin-desktop-browser-agent](https://github.com/qwadrox/bb-plugin-desktop-browser-agent). The CUA driver, the bb plugin parts, native messaging and most of the guardrails were removed.
 
-- **Desktop and browser control.** Agents read and operate native apps and
-  Chromium windows without taking over your screen.
-- **Your everyday browser (optional).** The bundled **Browser Bridge for bb**
-  extension lets agents work in Brave, Chrome or Edge tabs while you keep
-  browsing.
-- **Per-provider routing.** Providers with their own computer use, such as
-  Codex, keep it; everything else gets Cua Driver. You can also force Cua
-  Driver everywhere or turn it off.
-- **You decide what agents may do.** Risky tools (running code, killing apps,
-  recording) start off. **Ask before sensitive actions** makes agents wait
-  for your OK in the thread.
-- **One-click setup.** Install Cua Driver, grant macOS permissions and check
-  each machine from the settings page. Installs are pinned to the tested
-  driver version and verified by checksum.
-- **Keeps up with Cua Driver.** New driver tools reach agents without a
-  plugin release, and the settings page shows what changed.
-- **Works on every machine.** Each thread runs on the machine that owns its
-  environment, remote ones included.
+> **No guardrails.** Anyone who has the MCP URL can do anything in your browser that you can, including run JavaScript in your logged-in sessions. Keep the `SECRET` secret.
 
-| | |
+## Tools
+
+| Tool | What it does |
 | --- | --- |
-| ![Per-provider routing](docs/screenshots/2-routing.png) | ![Browser extension](docs/screenshots/3-browser-extension.png) |
-| ![Agent tools](docs/screenshots/4-agent-tools.png) | ![Machines](docs/screenshots/5-machines.png) |
+| `browser_tabs` | List the open tabs with ids, titles, URLs and groups |
+| `browser_navigate` | Open a URL. With no `tab_id` it opens a new tab in the agent's group. Also takes `back`, `forward` and `reload` |
+| `browser_read` | Read the page as an outline with refs; `query` and `scope` narrow it |
+| `browser_click` | Click a ref with a trusted mouse event |
+| `browser_fill` | Fill text fields, selects and checkboxes in one call |
+| `browser_key` | Press a key or a combo (`Enter`, `Control+A`, …) |
+| `browser_eval` | Run an async JS function body, in an isolated world (default) or the page's `main` world; returns its JSON value |
+| `browser_screenshot` | Take a JPEG of the tab or of one ref |
+| `browser_close` | Close a tab |
 
-## Get started
+Actions take an optional `wait_for` text to wait for after the action. Dialogs (`alert`, `confirm`, `prompt`) are accepted automatically and reported in the result.
 
-1. Install the plugin:
+## Run the server
 
-   ```sh
-   bb plugin install https://github.com/qwadrox/bb-plugin-desktop-browser-agent
-   ```
+Requires [Bun](https://bun.sh).
 
-2. Open **Settings → Plugins → Desktop & Browser Agent**, select **Install Cua Driver…**
-   next to your machine, and on macOS select **Grant macOS permissions**.
-3. Start a new thread and ask the agent to do something in an app.
+```sh
+bun install
+SECRET=$(openssl rand -hex 16) PORT=3000 bun start
+```
 
-Needs bb 0.39 or later. Tested on macOS 14+. Windows 10/11 and Linux (X11)
-are supported by Cua Driver but not yet tested with this plugin. The browser
-extension is tested on macOS; it has a Linux setup too, also untested, and
-none on Windows. For manual installs, see the
-[reference](docs/REFERENCE.md#requirements).
-
-## Two ways to work in a browser
-
-| | Browser window tools | Browser extension (optional) |
+| Env | Default | |
 | --- | --- | --- |
-| Tools | `cua_browser_*` | `browser_*` |
-| Runs through | Cua Driver, no extension | Browser Bridge for bb extension |
-| Reaches | one Chrome, Edge, Brave or Electron window | any tab of your everyday browser |
-| Your signed-in profile | only with **Signed-in browser profiles** on | always |
-| Default | on | off |
+| `PORT` | `3000` | |
+| `SECRET` | *(none)* | Path secret. The endpoints become `/mcp/<SECRET>` and `/ext/<SECRET>`. Without it they're `/mcp` and `/ext`, open to anyone who can reach the server |
 
-Both work in the background, but for web pages the extension is the better
-choice:
+Endpoints:
 
-- **Your real browser, no extra grants.** Agents use the browser you are
-  signed in to. The window tools need **Signed-in browser profiles** turned on
-  and Cua Driver restarted with that grant.
-- **Never takes over your screen.** The window tools bring the browser to the
-  front once per connection, and a connection lasts at most 30 minutes idle
-  or 8 hours. The extension stays in the background.
-- **Any tab, not one window.** Agents can read and act in tabs that are not
-  showing.
-- **You can see and stop it.** Tabs agents open go into a purple **Agent**
-  group, and **Pause agents** in the toolbar stops them at once.
+- `POST /mcp/<SECRET>?agent=<name>`: stateless Streamable HTTP MCP. You can send the agent name as an `X-Agent-Id` header instead. The default name is `Agent`.
+- `GET /ext/<SECRET>`: the extension's WebSocket.
+- `GET /healthz`: `{"ok":true,"browser":{…} | null}`.
 
-With the extension on, agents use it for web pages. The window tools remain
-for Electron apps and for browsers without the extension.
+To run it with Docker:
 
-## Browser extension (optional)
+```sh
+docker build -t browser-agent .
+docker run -p 3000:3000 -e SECRET=... browser-agent
+```
 
-![An agent filling in a sign-up form through the extension, with its cursor](docs/screenshots/browser-extension-demo.gif)
+Behind a reverse proxy, make sure the proxy passes WebSocket upgrades through on `/ext/…`. Tool calls can take up to 90 s, so allow long requests.
 
-Off until you turn it on:
+## Install the extension
 
-1. In **Settings → Plugins → Desktop & Browser Agent → Browser extension**, tick **Offer
-   browser_\* tools (extension)** and select **Install bridge**.
-2. Add [Browser Bridge for bb](https://chromewebstore.google.com/detail/aaidacbpcgjigclcoffjlcpnkmpnpgcc) from the Chrome Web
-   Store (it works in Brave and Edge too). To run a local build instead, run
-   `npm run build:extension`, open `brave://extensions` or
-   `chrome://extensions`, turn on Developer mode, select **Load unpacked**
-   and choose `browser-extension/dist`.
-3. Agents can now use your tabs. Tabs they open go into a purple **Agent**
-   group. **Pause agents** in the extension's popup stops them.
+The server URL is compiled into the extension:
 
-## Settings
+```sh
+SERVER_URL=wss://browser.example.com/ext/<SECRET> bun run build:extension
+# local: SERVER_URL=ws://127.0.0.1:3000/ext/<SECRET>
+```
 
-| Setting | Default | What it does |
-| --- | --- | --- |
-| Routing mode | Prefer provider tools | Which providers get Cua Driver tools |
-| Agent tools | reviewed defaults | Turn individual tools on or off |
-| Browser window tools, Clipboard tools | on | Turn Cua Driver's `cua_browser_*` or clipboard tools off |
-| Signed-in browser profiles | off | Let the browser window tools attach to your logged-in browser |
-| Browser extension | off | Offer the extension's `browser_*` tools |
-| Ask before sensitive actions | off | Ask in the thread before sensitive calls |
+Then in Chrome (version 116 or later), go to `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and pick `extension/dist`.
 
-Everything is also available from the terminal: `bb cua help`.
+The extension reconnects by itself. While it is driving a tab, Chrome shows a "started debugging this browser" bar.
 
-## More
+## Connect an agent
 
-- [Reference](docs/REFERENCE.md): every setting, routing, safety model, and
-  how it works.
-- [Browser extension](browser-extension/README.md): permissions, privacy, and
-  publishing.
-- [AGENTS.md](AGENTS.md): for development.
+Claude Code:
+
+```sh
+claude mcp add --transport http browser "https://browser.example.com/mcp/<SECRET>?agent=claude"
+```
+
+Any MCP client that speaks Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "browser": { "type": "http", "url": "https://browser.example.com/mcp/<SECRET>?agent=research" }
+  }
+}
+```
+
+Give each agent its own `agent=` name and it gets its own tab group. Agents can still see and use every tab.
+
+## Develop
+
+```sh
+bun run dev          # server with --watch
+bun run typecheck
+CHROMIUM="<Chrome for Testing binary>" bun run test:e2e
+```
+
+The end-to-end test starts the server, builds the extension against it, loads the extension into headless Chrome for Testing, and drives it over MCP. Branded Chrome ignores `--load-extension`, so get Chrome for Testing with `npx @puppeteer/browsers install chrome@stable`.
+
+Layout:
+
+- `server/src`: Bun server (`server.ts`), extension bridge (`bridge.ts`), MCP tool definitions (`tools.ts`)
+- `extension/src`: service worker (`background.ts`), in-page functions (`page.ts`, `outline.ts`), wire protocol (`shared.ts`)
 
 ## License
 
-MIT. Cua Driver is MIT licensed by Cua AI, Inc.; see [NOTICE.md](NOTICE.md).
+MIT. See [LICENSE](LICENSE).

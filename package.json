@@ -1,78 +1,25 @@
 {
-  "name": "bb-plugin-desktop-browser-agent",
-  "version": "0.5.4",
+  "name": "browser-agent",
+  "version": "0.1.0",
+  "private": true,
   "type": "module",
-  "engines": {
-    "bb": ">=0.39",
-    "bbPluginSdk": ">=0.4.16"
-  },
-  "bb": {
-    "name": "Desktop & Browser Agent",
-    "description": "Computer use for bb agents: desktop apps and browser windows through Cua Driver from Cua AI, and your own Chrome, Edge or Brave tabs through a browser extension, with per-provider routing.",
-    "branding": {
-      "icon": "./icons/desktop-browser-agent.svg"
-    },
-    "server": "./server.ts",
-    "app": "./app.tsx",
-    "host": "./host.ts",
-    "skills": [
-      "skills"
-    ]
+  "description": "An MCP server that lets AI agents use your own browser through a Chrome extension. Each agent gets its own tab group.",
+  "license": "MIT",
+  "scripts": {
+    "start": "bun server/src/index.ts",
+    "dev": "bun --watch server/src/index.ts",
+    "build:extension": "bun extension/build.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p extension/tsconfig.json",
+    "test": "bun test",
+    "test:e2e": "BROWSER_E2E=1 bun test e2e.test.ts"
   },
   "dependencies": {
-    "@radix-ui/react-slot": "^1.3.0",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "tailwind-merge": "^3.4.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.4.16",
-    "@radix-ui/react-dialog": "^1.1.23",
-    "@radix-ui/react-tooltip": "^1.2.16",
-    "@testing-library/react": "^16.3.0",
-    "@types/better-sqlite3": "^7.6.12",
-    "@types/node": "^22.0.0",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "bb-app": "^0.39.0",
-    "better-sqlite3": "^12.0.0",
-    "cron-parser": "^5.10.0",
-    "jsdom": "^29.0.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "sonner": "^2.0.8",
-    "typescript": "^5.7.0",
-    "vitest": "^4.0.0"
-  },
-  "description": "Desktop & Browser Agent for bb: computer use in the background on the thread's machine, powered by Cua Driver, with a Chrome extension for your own browser tabs and per-provider routing.",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/qwadrox/bb-plugin-desktop-browser-agent.git"
-  },
-  "homepage": "https://github.com/qwadrox/bb-plugin-desktop-browser-agent#readme",
-  "keywords": [
-    "bb-plugin",
-    "computer-use",
-    "browser-automation",
-    "chrome-extension",
-    "cua",
-    "desktop-automation",
-    "mcp"
-  ],
-  "scripts": {
-    "build": "bb plugin build",
-    "typecheck": "tsc --noEmit && npm run typecheck --workspace browser-extension",
-    "test": "vitest run",
-    "check": "npm run typecheck && npm run test && npm run build && npm run build:extension",
-    "sync:tools": "node scripts/sync-driver-tools.mjs",
-    "test:network": "CUA_NETWORK=1 vitest run src/installer.test.ts",
-    "test:live": "CUA_LIVE=1 vitest run live.test.ts",
-    "build:extension": "npm run build --workspace browser-extension",
-    "test:browser": "CUA_BROWSER_E2E=1 vitest run browser.e2e.test.ts"
-  },
-  "workspaces": [
-    "browser-extension"
-  ]
+    "@types/bun": "latest",
+    "@types/chrome": "^0.1.0",
+    "typescript": "^5.9.0"
+  }
 }
