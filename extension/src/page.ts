@@ -126,7 +126,7 @@ export function snapshotPage(options: SnapshotOptions): SnapshotResult {
   const VALUE_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton", "slider"]);
   const SPECIAL =
     "a[href],button,input:not([type=hidden]),select,textarea,summary,[role],[contenteditable=''],[contenteditable=true],h1,h2,h3,h4,h5,h6,table,ul,ol,iframe";
-  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "META", "LINK", "SVG", "CANVAS"]);
+  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "META", "LINK", "SVG", "CANVAS", "BROWSER-AGENT-OVERLAY"]);
   // Read item by item, row by row, even with no control inside.
   const CONTAINERS = new Set(["UL", "OL", "DL", "TABLE", "THEAD", "TBODY", "TFOOT"]);
   const MAX_LINES = 4000;

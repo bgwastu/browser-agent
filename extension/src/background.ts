@@ -21,8 +21,9 @@ import {
   type SnapshotResult,
 } from "./page.js";
 import { diffOutline } from "./outline.js";
+import { overlay, type OverlayCommand, type OverlayState } from "./overlay.js";
 import { SERVER_URL } from "./config.js";
-import { SERVER_URL_KEY, type ActionResult, type BridgeMessage, type BridgeRequest, type ConnectionStatus, type PageDialog, type TabInfo, type UploadFile } from "./shared.js";
+import { OVERLAY_KEY, SERVER_URL_KEY, type ActionResult, type BridgeMessage, type BridgeRequest, type ConnectionStatus, type PageDialog, type TabInfo, type UploadFile } from "./shared.js";
 
 const CDP_VERSION = "1.3";
 const CDP_TIMEOUT_MS = 10_000;
@@ -128,17 +129,93 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && SERVER_URL_KEY in changes) reconnect();
 });
 
-chrome.runtime.onMessage.addListener((request: unknown, _sender, reply) => {
-  if ((request as { type?: string } | null)?.type !== "status") return;
+chrome.runtime.onMessage.addListener((request: unknown, sender, reply) => {
+  const kind = (request as { type?: string } | null)?.type;
+  // The page's Stop and Resume button.
+  if (kind === "overlay-stop" && sender.tab?.id !== undefined) {
+    if ((request as { stopped?: boolean }).stopped === true) stoppedTabs.add(sender.tab.id);
+    else stoppedTabs.delete(sender.tab.id);
+    return;
+  }
+  if (kind !== "status") return;
   reply({ ...status, url: serverUrl ?? "" });
 });
 
 async function handle(request: BridgeRequest): Promise<void> {
+  const params = request.params as { tab_id?: unknown };
+  const tabId = request.method !== "tabs" && typeof params.tab_id === "number" ? params.tab_id : null;
   try {
-    send({ id: request.id, result: await dispatch(request) });
+    // The user's Stop holds before anything else happens to the tab.
+    if (tabId !== null) await present(tabId, request.agent, true);
+    const result = await dispatch(request);
+    if (tabId !== null && request.method !== "close") await present(tabId, request.agent, false);
+    // A tab the agent just opened shows it too.
+    const opened = (result as { opened?: TabInfo } | null)?.opened?.tab_id;
+    if (opened !== undefined) await present(opened, request.agent, false);
+    send({ id: request.id, result });
   } catch (error) {
+    if (tabId !== null && !(error instanceof StoppedError)) await present(tabId, request.agent, false).catch(() => undefined);
     send({ id: request.id, error: message(error) });
   }
+}
+
+// ---------------------------------------------------------------- on-page presence
+
+/** How long the frame and pill stay after the agent's last call on a tab. */
+const LINGER_MS = 15_000;
+
+class StoppedError extends Error {}
+
+let overlayOn = true;
+void chrome.storage.local.get(OVERLAY_KEY).then((stored) => {
+  overlayOn = stored[OVERLAY_KEY] !== false;
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && OVERLAY_KEY in changes) overlayOn = changes[OVERLAY_KEY]?.newValue !== false;
+});
+
+/** Tabs whose page the user pressed Stop on: no calls until they press Resume. */
+const stoppedTabs = new Set<number>();
+
+function stoppedError(tabId: number): StoppedError {
+  return new StoppedError(
+    `The user pressed Stop on tab ${tabId}, so it is off limits until they press Resume on the page. ` +
+      "Do not work around this (another tab on the same site counts too): tell the user what you were doing and ask them to resume.",
+  );
+}
+
+/** Runs an overlay command; pages the extension cannot script (chrome://, the web store) simply have none. */
+async function overlayCommand(tabId: number, command: OverlayCommand): Promise<OverlayState | null> {
+  if (!overlayOn) return null;
+  const run = chrome.scripting
+    .executeScript({ target: { tabId }, func: overlay, args: [command] })
+    .then(([frame]) => (frame?.result as OverlayState | undefined) ?? null)
+    .catch(() => null);
+  // A page that does not answer must not hold up the agent.
+  return Promise.race([run, sleep(3_000).then(() => null)]);
+}
+
+/** Shows that the agent is using the tab, and learns whether the user stopped it there. Throws if they did. */
+async function present(tabId: number, agent: string, busy: boolean): Promise<void> {
+  if (!overlayOn) {
+    stoppedTabs.delete(tabId);
+    return;
+  }
+  const state = await overlayCommand(tabId, { op: "show", label: agent, busy, paused: stoppedTabs.has(tabId), linger_ms: LINGER_MS });
+  if (state !== null) {
+    if (state.stopped) stoppedTabs.add(tabId);
+    else stoppedTabs.delete(tabId);
+  }
+  if (busy && stoppedTabs.has(tabId)) throw stoppedError(tabId);
+}
+
+/** Moves the on-page cursor to where the agent is about to point. */
+async function pointer(tabId: number, point: Point, extra: { click?: boolean; grab?: boolean; ms?: number; wait?: boolean } = {}): Promise<void> {
+  await overlayCommand(tabId, { op: "cursor", x: point.x, y: point.y, ...extra });
+}
+
+async function spotlight(tabId: number, ref: string): Promise<void> {
+  await overlayCommand(tabId, { op: "focus", ref });
 }
 
 // WebSocket traffic keeps the service worker alive (Chrome 116+); the alarm revives it if it was stopped anyway.
@@ -366,6 +443,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   dialogLog.delete(tabId);
   consoleLog.delete(tabId);
   networkLog.delete(tabId);
+  stoppedTabs.delete(tabId);
 });
 
 // A new document replaces the page's isolated world. A call that raced the load recovers in run().
@@ -781,6 +859,7 @@ async function dragPoints(tabId: number, from: Point, to: Point, modifiers: numb
 async function clickRef(tabId: number, ref: string): Promise<Record<string, unknown>> {
   const spot = await located(tabId, ref);
   let route = "trusted";
+  await pointer(tabId, { x: spot.x, y: spot.y }, { click: true });
   try {
     const point = { x: spot.x, y: spot.y };
     await cdp(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", ...point }, INPUT_TIMEOUT_MS);
@@ -1015,12 +1094,14 @@ async function dispatch(request: BridgeRequest): Promise<unknown> {
         } else {
           from = point!;
           target = await evaluate<string | null>(tabId, pointAt, from);
+          if (target === null) throw new Error(`Nothing is at (${from.x}, ${from.y}): the point is outside the viewport. browser_screenshot shows the viewport, in the same CSS pixels.`);
         }
         const done: Record<string, unknown> = {
           ...(target !== null ? { target: `point (${from.x}, ${from.y}): ${target}` } : {}),
           ...(covered !== null ? { covered_by: covered } : {}),
         };
         if (params.hover === true) {
+          await pointer(tabId, from);
           await mouse(tabId, "mouseMoved", from, { modifiers });
           return { ...done, did: "hovered" };
         }
@@ -1039,9 +1120,12 @@ async function dispatch(request: BridgeRequest): Promise<unknown> {
           } else {
             throw new Error("drag_to must be a ref or {x, y}.");
           }
+          await pointer(tabId, from);
+          await pointer(tabId, to, { grab: true, ms: 320, wait: false });
           await dragPoints(tabId, from, to, modifiers);
           return { ...done, did: "dragged", to: typeof dragTo === "string" ? dragTo : `(${to.x}, ${to.y})` };
         }
+        await pointer(tabId, from, { click: true });
         await clickPoint(tabId, from, button, count, modifiers);
         const kind = count === 2 ? "double-clicked" : count === 3 ? "triple-clicked" : "clicked";
         return { ...done, did: button === "left" ? kind : `${button}-${kind}` };
@@ -1052,7 +1136,10 @@ async function dispatch(request: BridgeRequest): Promise<unknown> {
       const tabId = await existingTab(params.tab_id);
       const ref = required(params.ref, "ref");
       if (!Array.isArray(params.files) || params.files.length === 0) throw new Error("files must list one or more files.");
-      return act(tabId, agent, [ref], params, (start) => upload(tabId, start.refs[0]!, params.files));
+      return act(tabId, agent, [ref], params, async (start) => {
+        await spotlight(tabId, start.refs[0]!);
+        return upload(tabId, start.refs[0]!, params.files);
+      });
     }
     case "logs": {
       const { params } = request;
@@ -1118,6 +1205,7 @@ async function dispatch(request: BridgeRequest): Promise<unknown> {
           const filled: Array<{ ref: string; value: string }> = [];
           for (const field of entries) {
             try {
+              await spotlight(tabId, field.ref);
               filled.push({ ref: field.ref, value: await fillField(tabId, field.ref, field.value) });
             } catch (error) {
               if (filled.length === 0) throw error;
@@ -1161,6 +1249,7 @@ async function dispatch(request: BridgeRequest): Promise<unknown> {
             : `Ref ${ref} takes no space on the page, so there is nothing to show.`,
         );
       }
+      await overlayCommand(tabId, { op: "hide" });
       try {
         const shot = await cdp<{ data: string }>(
           tabId,

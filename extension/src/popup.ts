@@ -1,5 +1,5 @@
 // The toolbar popup: set the server URL and see whether the extension is connected.
-import { SERVER_URL_KEY, type ConnectionStatus } from "./shared.js";
+import { OVERLAY_KEY, SERVER_URL_KEY, type ConnectionStatus } from "./shared.js";
 
 const form = document.getElementById("form") as HTMLFormElement;
 const input = document.getElementById("url") as HTMLInputElement;
@@ -42,6 +42,12 @@ form.addEventListener("submit", async (event) => {
     saved.textContent = error instanceof Error ? error.message : String(error);
   }
 });
+
+const overlayBox = document.getElementById("overlay") as HTMLInputElement;
+void chrome.storage.local.get(OVERLAY_KEY).then((stored) => {
+  overlayBox.checked = stored[OVERLAY_KEY] !== false;
+});
+overlayBox.addEventListener("change", () => void chrome.storage.local.set({ [OVERLAY_KEY]: overlayBox.checked }));
 
 void refresh();
 setInterval(() => void refresh(), 1000);

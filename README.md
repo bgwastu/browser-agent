@@ -35,6 +35,12 @@ If the page re-rendered an element, so its ref is gone, actions use the one elem
 
 Actions take an optional `wait_for` text to wait for after the action. Dialogs (`alert`, `confirm`, `prompt`) are accepted automatically and reported in the result.
 
+## On the page
+
+A tab an agent is using glows at its edges and shows a pill at the bottom, "<agent> is using this tab", with a **Stop** button. The agent's cursor glides to each point it clicks, hovers or drags, and the fields it fills get a ring. All of this sits in a closed shadow root, so the page's scripts cannot see into it, and it is left out of `browser_read` and screenshots. While a call runs the pill lets clicks through, so it never covers what the agent clicks. It fades 15 s after the agent's last call.
+
+**Stop** blocks every agent from that tab until you press **Resume**, even after you navigate the tab yourself. The agent gets an error telling it to ask you. To turn all of it off, untick "Show on pages when an agent is using them" in the popup.
+
 ## Run the server
 
 Requires [Bun](https://bun.sh).

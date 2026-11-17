@@ -12,6 +12,8 @@
   #status { margin-top: 10px; display: flex; gap: 6px; align-items: center; }
   #dot { width: 8px; height: 8px; border-radius: 50%; background: #aaa; flex: none; }
   #dot.connected { background: #2a2; } #dot.connecting { background: #e90; } #dot.error { background: #d33; }
+  #overlay-row { display: flex; gap: 6px; align-items: center; margin: 10px 0 0; color: inherit; cursor: pointer; }
+  #overlay-row input { width: auto; margin: 0; }
   #hint { color: #888; font-size: 11px; margin-top: 6px; }
   @media (prefers-color-scheme: dark) { body { background: #222; color: #eee; } input, button { background: #333; color: #eee; border-color: #555; } label, #hint { color: #aaa; } }
 </style>
@@ -24,6 +26,7 @@
     <div class="row"><button type="submit">Save</button><span id="saved"></span></div>
   </form>
   <div id="status"><span id="dot"></span><span id="text">…</span></div>
+  <label id="overlay-row"><input type="checkbox" id="overlay"> Show on pages when an agent is using them</label>
   <div id="hint">The extension's endpoint on your browser-agent server: /ext/&lt;SECRET&gt;. https:// works too.</div>
   <script type="module" src="popup.js"></script>
 </body>

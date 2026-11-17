@@ -100,6 +100,8 @@ export interface ActionResult {
 
 /** chrome.storage.local key of the server URL set in the popup. */
 export const SERVER_URL_KEY = "serverUrl";
+/** Whether pages show that an agent is using them (frame, Stop pill, cursor). On unless set to false. */
+export const OVERLAY_KEY = "overlay";
 
 /** What the popup shows about the connection to the server. */
 export interface ConnectionStatus {

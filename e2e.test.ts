@@ -72,6 +72,93 @@ function rerender() { const b = document.createElement('button'); b.textContent 
 <p>Plain paragraph text</p>
 <ul id="out"></ul>`;
 
+const PRESENCE = `<!doctype html><title>Presence</title>
+<h1>Presence</h1>
+<label>Note <input id="note"></label>
+<button onclick="document.getElementById('said').textContent = 'Clicked ' + (++window.clicks || (window.clicks = 1))">Press me</button>
+<p id="said"></p>
+<button style="position:fixed;left:0;bottom:0;width:100%;height:90px" onclick="document.getElementById('said').textContent = 'Bottom bar clicked'">Bottom bar</button>`;
+
+/** A second DevTools client, standing in for the user: real mouse input, navigation, and a look inside closed shadow roots. */
+interface Session {
+  send<T = Record<string, unknown>>(method: string, params?: Record<string, unknown>): Promise<T>;
+  close(): void;
+}
+
+async function openSession(port: number, match: (target: { type: string; url: string }) => boolean): Promise<Session> {
+  const targets = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()) as Array<{ type: string; url: string; webSocketDebuggerUrl: string }>;
+  const target = targets.find(match);
+  if (target === undefined) throw new Error(`no DevTools target matches, among:\n${targets.map((each) => `${each.type} ${each.url}`).join("\n")}`);
+  const socket = new WebSocket(target.webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    socket.onopen = resolve;
+    socket.onerror = reject;
+  });
+  let next = 0;
+  const pending = new Map<number, (message: { result?: unknown; error?: { message: string } }) => void>();
+  socket.onmessage = (event) => {
+    const message = JSON.parse(String(event.data)) as { id?: number; result?: unknown; error?: { message: string } };
+    if (message.id !== undefined) pending.get(message.id)?.(message);
+  };
+  return {
+    send: <T,>(method: string, params: Record<string, unknown> = {}) =>
+      new Promise<T>((resolve, reject) => {
+        const id = ++next;
+        pending.set(id, (message) => (message.error !== undefined ? reject(new Error(message.error.message)) : resolve(message.result as T)));
+        socket.send(JSON.stringify({ id, method, params }));
+      }),
+    close: () => socket.close(),
+  };
+}
+
+interface DomNode {
+  nodeId: number;
+  nodeName: string;
+  nodeValue?: string;
+  attributes?: string[];
+  children?: DomNode[];
+  shadowRoots?: DomNode[];
+}
+
+/** What the overlay shows, read through its closed shadow root; null if the page has none. */
+async function overlayOf(
+  session: Session,
+): Promise<{ text: string; root: string; button: { x: number; y: number; label: string } | null; cursor: { class: string; style: string } } | null> {
+  const { root } = await session.send<{ root: DomNode }>("DOM.getDocument", { depth: -1, pierce: true });
+  const all = (node: DomNode): DomNode[] => [node, ...(node.children ?? []).flatMap(all), ...(node.shadowRoots ?? []).flatMap(all)];
+  const hosts = all(root).filter((node) => node.nodeName === "BROWSER-AGENT-OVERLAY");
+  if (hosts.length === 0) return null;
+  if (hosts.length > 1) throw new Error(`${hosts.length} overlays on the page`);
+  const inside = all(hosts[0]!);
+  const classOf = (node: DomNode): string => {
+    const at = node.attributes?.indexOf("class") ?? -1;
+    return at >= 0 ? node.attributes![at + 1]! : "";
+  };
+  const textOf = (node: DomNode | undefined): string => (node === undefined ? "" : all(node).map((each) => (each.nodeName === "#text" ? each.nodeValue ?? "" : "")).join(""));
+  const button = inside.find((node) => node.nodeName === "BUTTON");
+  let point: { x: number; y: number; label: string } | null = null;
+  if (button !== undefined) {
+    const { model } = await session.send<{ model: { content: number[] } }>("DOM.getBoxModel", { nodeId: button.nodeId });
+    const [x1, y1, , , x3, y3] = model.content;
+    point = { x: (x1! + x3!) / 2, y: (y1! + y3!) / 2, label: textOf(button) };
+  }
+  const cursor = inside.find((node) => classOf(node).startsWith("cursor"))!;
+  const styleAt = cursor.attributes?.indexOf("style") ?? -1;
+  return {
+    text: textOf(inside.find((node) => classOf(node) === "text")),
+    root: classOf(inside.find((node) => classOf(node).startsWith("root"))!),
+    button: point,
+    cursor: { class: classOf(cursor), style: styleAt >= 0 ? cursor.attributes![styleAt + 1]! : "" },
+  };
+}
+
+/** A real (trusted) click, as the user would make. */
+async function userClick(session: Session, point: { x: number; y: number }): Promise<void> {
+  await session.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y });
+  await session.send("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1 });
+  await session.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", clickCount: 1 });
+}
+
 function refFor(text: string, pattern: RegExp): string {
   const line = text.split("\n").find((entry) => pattern.test(entry));
   const ref = line === undefined ? undefined : /^\[(e\d+)\]/.exec(line)?.[1];
@@ -124,7 +211,7 @@ describe.skipIf(!enabled)("browser-agent end to end", () => {
         const path = new URL(request.url).pathname;
         if (path === "/api/data") return Response.json({ value: 42 });
         if (path === "/files/report.txt") return new Response("from a url", { headers: { "content-type": "text/plain" } });
-        const html = ({ "/second": SECOND, "/features": FEATURES, "/panel": PANEL, "/toolkit": TOOLKIT } as Record<string, string>)[path] ?? FORM;
+        const html = ({ "/presence": PRESENCE, "/second": SECOND, "/features": FEATURES, "/panel": PANEL, "/toolkit": TOOLKIT } as Record<string, string>)[path] ?? FORM;
         return new Response(html, { headers: { "content-type": "text/html" } });
       },
     });
@@ -148,6 +235,7 @@ describe.skipIf(!enabled)("browser-agent end to end", () => {
         "--no-default-browser-check",
         "--use-mock-keychain",
         "--window-size=1000,800",
+        "--remote-debugging-port=0",
         "about:blank",
       ],
       { stdout: "ignore", stderr: "ignore" },
@@ -169,6 +257,11 @@ describe.skipIf(!enabled)("browser-agent end to end", () => {
   });
 
   let tabId: number;
+
+  /** The browser's DevTools port, for the stand-in user. */
+  async function devtoolsPort(): Promise<number> {
+    return Number((await Bun.file(join(work, "profile", "DevToolsActivePort")).text()).split("\n")[0]);
+  }
 
   it("lists the eleven tools", async () => {
     const { tools } = await (await client("research")).listTools();
@@ -404,6 +497,148 @@ describe.skipIf(!enabled)("browser-agent end to end", () => {
       const changed = await call("browser_eval", { tab_id: tab, code: "document.querySelector('h1').textContent = 'Changed'; return null" });
       expect(changed).toContain("+ # Changed");
       await expect(call("browser_eval", { tab_id: tab, code: "throw new Error('boom')" })).rejects.toThrow(/boom/);
+    });
+  });
+
+  describe("showing the user that an agent is at work", () => {
+    let tab: number;
+    let page: string;
+    let user: Session;
+
+    beforeAll(async () => {
+      tab = tabIdIn(await call("browser_navigate", { url: `${base}/presence`, group: "Presence" }));
+      page = await call("browser_read", { tab_id: tab });
+      user = await openSession(await devtoolsPort(), (target) => target.type === "page" && target.url.startsWith(`${base}/presence`));
+    });
+    afterAll(() => user?.close());
+
+    it("frames the page with a pill naming the agent, which the agent's reads leave out", async () => {
+      const shown = await overlayOf(user);
+      expect(shown).not.toBeNull();
+      expect(shown!.text).toBe("research is using this tab");
+      expect(shown!.root).toContain("on");
+      expect(shown!.root).not.toContain("busy");
+      expect(shown!.button!.label).toBe("Stop");
+      expect(page).not.toContain("using this tab");
+      expect(page).not.toContain("Stop");
+      // Closed to the page's own scripts.
+      expect(await call("browser_eval", { tab_id: tab, world: "main", code: "const host = document.querySelector('browser-agent-overlay'); return [host !== null, host?.shadowRoot ?? null]" })).toContain("true,\n  null");
+    });
+
+    it("moves its cursor to what the agent clicks, and the click still lands", async () => {
+      const clicked = await call("browser_click", { tab_id: tab, ref: refFor(page, /button "Press me"/) });
+      expect(clicked).toContain("+ Clicked 1");
+      expect(clicked).not.toMatch(/using this tab|Stop/);
+      const cursor = (await overlayOf(user))!.cursor;
+      expect(cursor.class).toContain("show");
+      expect(cursor.style).toMatch(/translate\(\d+(\.\d+)?px, \d+(\.\d+)?px\)/);
+    });
+
+    it("lets the agent click what lies under the pill", async () => {
+      const bar = await call("browser_click", { tab_id: tab, ref: refFor(page, /button "Bottom bar"/) });
+      expect(bar).toContain("+ Bottom bar clicked");
+      expect(bar).not.toContain("covered");
+      const height = Number(/\d+/.exec(await call("browser_eval", { tab_id: tab, code: "return innerHeight" }))![0]);
+      const point = await call("browser_click", { tab_id: tab, x: 500, y: height - 25 });
+      expect(point).toContain('<button> "Bottom bar"');
+      await expect(call("browser_click", { tab_id: tab, x: 500, y: height + 500 })).rejects.toThrow(/outside the viewport/);
+    });
+
+    it("rings the fields it fills, and hides itself from screenshots", async () => {
+      expect(await call("browser_fill", { tab_id: tab, fields: [{ ref: refFor(page, /textbox "Note"/), value: "hello" }] })).toContain('value="hello"');
+      const shot = (await (await client("research")).callTool({ name: "browser_screenshot", arguments: { tab_id: tab } })) as { content: Array<{ type: string }> };
+      expect(shot.content.some((part) => part.type === "image")).toBe(true);
+      expect((await overlayOf(user))!.root).not.toContain("hidden");
+    });
+
+    it("stops the agent when the user presses Stop, across the user's own navigation, until Resume", async () => {
+      // Clicks pass the pill while a call runs; between calls the user can press it.
+      const before = await overlayOf(user);
+      await userClick(user, before!.button!);
+      const stopped = await overlayOf(user);
+      expect(stopped!.text).toContain("You stopped research");
+      expect(stopped!.button!.label).toBe("Resume");
+      expect(stopped!.root).not.toMatch(/\bon\b/);
+      await expect(call("browser_click", { tab_id: tab, ref: refFor(page, /button "Press me"/) })).rejects.toThrow(/pressed Stop on tab/);
+      await expect(call("browser_read", { tab_id: tab })).rejects.toThrow(/pressed Stop/);
+      await expect(call("browser_close", { tab_id: tab })).rejects.toThrow(/pressed Stop/);
+      // Another agent is stopped too, and the page saw no click.
+      await expect(call("browser_read", { tab_id: tab }, "other")).rejects.toThrow(/pressed Stop/);
+      expect(await call("browser_eval", { tab_id: tab, world: "main", code: "return 1" }).catch((error: Error) => error.message)).toMatch(/pressed Stop/);
+
+      // The user moves on themselves: the new page still says stopped.
+      await user.send("Page.navigate", { url: `${base}/presence?again` });
+      await Bun.sleep(800);
+      await expect(call("browser_read", { tab_id: tab })).rejects.toThrow(/pressed Stop/);
+      const after = await overlayOf(user);
+      expect(after!.button!.label).toBe("Resume");
+
+      await userClick(user, after!.button!);
+      const resumed = await call("browser_read", { tab_id: tab });
+      expect(resumed).toContain("# Presence");
+      expect((await overlayOf(user))!.button!.label).toBe("Stop");
+    });
+
+    it("hears a Stop at once, even when the user leaves the page right after", async () => {
+      await call("browser_read", { tab_id: tab });
+      await userClick(user, (await overlayOf(user))!.button!);
+      // No agent call in between: only the page's report to the extension can carry the Stop.
+      await user.send("Page.navigate", { url: `${base}/second?left` });
+      await Bun.sleep(800);
+      await expect(call("browser_read", { tab_id: tab })).rejects.toThrow(/pressed Stop/);
+      await userClick(user, (await overlayOf(user))!.button!);
+      expect(await call("browser_read", { tab_id: tab })).toContain("Second page");
+      await call("browser_navigate", { tab_id: tab, url: `${base}/presence` });
+    });
+
+    it("keeps one overlay through reloads and the agent's navigation", async () => {
+      await call("browser_navigate", { tab_id: tab, url: "reload" });
+      expect((await overlayOf(user))!.text).toBe("research is using this tab");
+      await call("browser_navigate", { tab_id: tab, url: `${base}/second` });
+      const shown = await overlayOf(user);
+      expect(shown!.root).toContain("on");
+      await call("browser_navigate", { tab_id: tab, url: "back" });
+      await call("browser_read", { tab_id: tab });
+      expect(await overlayOf(user)).not.toBeNull();
+    });
+
+    it("can be switched off in the popup", async () => {
+      const port = await devtoolsPort();
+      const targets = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()) as Array<{ type: string; url: string }>;
+      let extensionId = "";
+      for (const worker of targets.filter((target) => target.type === "service_worker")) {
+        const session = await openSession(port, (target) => target.url === worker.url);
+        const { result } = await session.send<{ result: { value?: string } }>("Runtime.evaluate", { expression: "chrome.runtime?.getManifest?.().name", returnByValue: true });
+        session.close();
+        if (result.value === "Browser Agent") extensionId = new URL(worker.url).host;
+      }
+      expect(extensionId).not.toBe("");
+      await fetch(`http://127.0.0.1:${port}/json/new?chrome-extension://${extensionId}/popup.html`, { method: "PUT" });
+      await Bun.sleep(500);
+      const popup = await openSession(port, (target) => target.url.endsWith("/popup.html"));
+      const toggle = async (): Promise<boolean> => {
+        const { result } = await popup.send<{ result: { value: { x: number; y: number } } }>("Runtime.evaluate", {
+          expression: "(() => { const box = document.getElementById('overlay').getBoundingClientRect(); return { x: box.x + box.width / 2, y: box.y + box.height / 2 } })()",
+          returnByValue: true,
+        });
+        await userClick(popup, result.value);
+        await Bun.sleep(200);
+        return (await popup.send<{ result: { value: boolean } }>("Runtime.evaluate", { expression: "document.getElementById('overlay').checked", returnByValue: true })).result.value;
+      };
+      try {
+        expect(await toggle()).toBe(false);
+        const fresh = tabIdIn(await call("browser_navigate", { url: `${base}/second?off`, group: "Presence" }));
+        await call("browser_click", { tab_id: fresh, x: 20, y: 20 });
+        const plain = await openSession(port, (target) => target.url === `${base}/second?off`);
+        expect(await overlayOf(plain)).toBeNull();
+        plain.close();
+        await call("browser_close", { tab_id: fresh });
+      } finally {
+        expect(await toggle()).toBe(true);
+        popup.close();
+      }
+      await call("browser_read", { tab_id: tab });
+      expect(await overlayOf(user)).not.toBeNull();
     });
   });
 
