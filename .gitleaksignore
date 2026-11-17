@@ -1,0 +1,2 @@
+# Upstream manifest "key": the extension public key (MIIBIjAN... = RSA public key), not a secret.
+916f4b8f0aec310c8137ed041adec3034b405320:browser-extension/static/manifest.json:generic-api-key:7
